@@ -11,7 +11,7 @@ export const DEFAULT_BROWSER_CONFIG: ResolvedBrowserConfig = {
   chromeCookiePath: null,
   url: CHATGPT_URL,
   chatgptUrl: CHATGPT_URL,
-  timeoutMs: 1_200_000,
+  timeoutMs: 5_400_000,
   debugPort: null,
   inputTimeoutMs: 60_000,
   assistantRecheckDelayMs: 0,

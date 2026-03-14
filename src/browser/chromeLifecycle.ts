@@ -314,8 +314,6 @@ export async function closeTab(
 function buildChromeFlags(headless: boolean, debugBindAddress?: string | null): string[] {
   const flags = [
     "--disable-background-networking",
-    "--disable-background-timer-throttling",
-    "--disable-breakpad",
     "--disable-client-side-phishing-detection",
     "--disable-default-apps",
     "--disable-hang-monitor",
@@ -324,14 +322,27 @@ function buildChromeFlags(headless: boolean, debugBindAddress?: string | null): 
     "--disable-sync",
     "--disable-translate",
     "--metrics-recording-only",
+    "--enable-logging=stderr",
     "--no-first-run",
     "--safebrowsing-disable-auto-update",
     "--disable-features=TranslateUI,AutomationControlled",
+    "--disable-gpu",
+    "--js-flags=--max-old-space-size=4096",
+    "--noerrdialogs",
+    "--disable-session-crashed-bubble",
     "--mute-audio",
     "--window-size=1280,720",
     "--lang=en-US",
     "--accept-lang=en-US,en",
   ];
+
+  if (process.platform === "linux") {
+    flags.push("--disable-dev-shm-usage");
+  }
+
+  if (process.env.ORACLE_DISABLE_BG_THROTTLE === "1") {
+    flags.push("--disable-background-timer-throttling");
+  }
 
   if (process.platform !== "win32" && !isWsl()) {
     flags.push("--password-store=basic", "--use-mock-keychain");

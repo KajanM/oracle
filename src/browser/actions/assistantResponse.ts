@@ -16,6 +16,9 @@ import {
 import { buildClickDispatcher } from "./domEvents.js";
 
 const ASSISTANT_POLL_TIMEOUT_ERROR = "assistant-response-watchdog-timeout";
+const ASSISTANT_POLL_INITIAL_DELAY_MS = 200;
+const ASSISTANT_POLL_MAX_DELAY_MS = 1_000;
+const ASSISTANT_PARTIAL_CAPTURE_INTERVAL_MS = 120_000;
 
 function isAnswerNowPlaceholderText(normalized: string): boolean {
   const text = normalized.trim();
@@ -69,6 +72,7 @@ export async function waitForAssistantResponse(
     timeoutMs,
     minTurnIndex,
     pollerAbort.signal,
+    logger,
   ).then(
     (value) => ({ kind: "poll" as const, value }),
     (error) => {
@@ -154,18 +158,13 @@ export async function waitForAssistantResponse(
   const elapsedMs = Date.now() - start;
   const remainingMs = Math.max(0, timeoutMs - elapsedMs);
   if (remainingMs > 0) {
-    const [stopVisible, completionVisible] = await Promise.all([
-      isStopButtonVisible(Runtime),
-      isCompletionVisible(Runtime),
-    ]);
-    if (stopVisible) {
+    const generationState = await readAssistantGenerationUiState(Runtime);
+    if (generationState.stopVisible) {
       logger("Assistant still generating; waiting for completion");
-      const completed = await pollAssistantCompletion(Runtime, remainingMs, minTurnIndex);
+      const completed = await pollAssistantCompletion(Runtime, remainingMs, minTurnIndex, undefined, logger);
       if (completed) {
         return completed;
       }
-    } else if (completionVisible) {
-      // No-op: completion UI surfaced and stop button is gone.
     }
   }
 
@@ -389,117 +388,260 @@ async function pollAssistantCompletion(
   timeoutMs: number,
   minTurnIndex?: number,
   abortSignal?: AbortSignal,
+  logger?: BrowserLogger,
 ): Promise<{
   text: string;
   html?: string;
   meta: { turnId?: string | null; messageId?: string | null };
 } | null> {
   const watchdogDeadline = Date.now() + timeoutMs;
-  let previousLength = 0;
-  let stableCycles = 0;
-  let lastChangeAt = Date.now();
+  const pollStartMs = Date.now();
+  let pollDelayMs = ASSISTANT_POLL_INITIAL_DELAY_MS;
+  let nextPartialCaptureAt = Date.now() + ASSISTANT_PARTIAL_CAPTURE_INTERVAL_MS;
+  let nextStatusLogAt = Date.now() + 30_000;
+  let lastPartialText = "";
+  let done = false;
+  let pollCycles = 0;
+  let lastStopVisible = false;
+  let lastCompletionVisible = false;
+  let noStopStableCycles = 0;
+  if (logger) {
+    logger(`[browser] [poll] start — timeout=${timeoutMs}ms minTurn=${minTurnIndex ?? "none"}`);
+  }
   while (Date.now() < watchdogDeadline) {
-    // Check abort signal to stop polling when another path won the race
     if (abortSignal?.aborted) {
+      if (logger) {
+        logger(`[browser] [poll] aborted after ${pollCycles} cycles`);
+      }
       return null;
     }
-    const snapshot = await readAssistantSnapshot(Runtime, minTurnIndex);
-    const normalized = normalizeAssistantSnapshot(snapshot);
-    if (normalized) {
-      const currentLength = normalized.text.length;
-      if (currentLength > previousLength) {
-        previousLength = currentLength;
-        stableCycles = 0;
-        lastChangeAt = Date.now();
-      } else {
-        stableCycles += 1;
+    if (logger && Date.now() >= nextPartialCaptureAt) {
+      try {
+        lastPartialText = await capturePartialAssistantProgress(
+          Runtime,
+          logger,
+          minTurnIndex,
+          lastPartialText,
+        );
+      } catch {
+        // Best-effort partial capture — keep completion polling alive.
+      } finally {
+        nextPartialCaptureAt = Date.now() + ASSISTANT_PARTIAL_CAPTURE_INTERVAL_MS;
       }
-      const [stopVisible, completionVisible] = await Promise.all([
-        isStopButtonVisible(Runtime),
-        isCompletionVisible(Runtime),
-      ]);
-      const shortAnswer = currentLength > 0 && currentLength < 16;
-      const mediumAnswer = currentLength >= 16 && currentLength < 40;
-      const longAnswer = currentLength >= 40 && currentLength < 500;
-      // Learned: short answers need a longer stability window or they truncate.
-      // Learned: long streaming responses (esp. thinking models) can pause mid-stream;
-      // use progressively longer windows to avoid truncation (#71).
-      const completionStableTarget = shortAnswer ? 12 : mediumAnswer ? 8 : longAnswer ? 6 : 8;
-      const requiredStableCycles = shortAnswer ? 12 : mediumAnswer ? 8 : longAnswer ? 8 : 10;
-      const stableMs = Date.now() - lastChangeAt;
-      const minStableMs = shortAnswer ? 8000 : mediumAnswer ? 1200 : longAnswer ? 2000 : 3000;
-      // Require stop button to disappear before treating completion as final.
-      if (!stopVisible) {
-        const stableEnough = stableCycles >= requiredStableCycles && stableMs >= minStableMs;
-        const completionEnough =
-          completionVisible && stableCycles >= completionStableTarget && stableMs >= minStableMs;
-        if (completionEnough || stableEnough) {
-          return normalized;
-        }
-      }
-    } else {
-      previousLength = 0;
-      stableCycles = 0;
     }
-    await delay(400);
+    let generationState: {
+      stopVisible: boolean;
+      completionVisible: boolean;
+      debug?: { turnCount: number; lastAssistantFound: boolean; copyButtonGlobal: boolean; copyButtonInTurn: boolean };
+    };
+    try {
+      generationState = await readAssistantGenerationUiState(Runtime);
+    } catch (evalError) {
+      if (logger) {
+        const msg = evalError instanceof Error ? evalError.message : String(evalError);
+        logger(`[browser] [poll] Runtime.evaluate FAILED cycle=${pollCycles} error=${msg.slice(0, 200)}`);
+      }
+      generationState = { stopVisible: false, completionVisible: false };
+    }
+    pollCycles += 1;
+
+    // When stop button disappears, immediately capture text for fallback detection
+    if (!generationState.stopVisible && lastStopVisible && logger) {
+      try {
+        lastPartialText = await capturePartialAssistantProgress(
+          Runtime, logger, minTurnIndex, lastPartialText,
+        );
+      } catch {
+        // best-effort
+      }
+    }
+
+    // Track text stability for fallback completion detection
+    if (!generationState.stopVisible && lastPartialText.length > 0) {
+      noStopStableCycles += 1;
+    } else {
+      noStopStableCycles = 0;
+    }
+
+    if (
+      generationState.stopVisible !== lastStopVisible ||
+      generationState.completionVisible !== lastCompletionVisible
+    ) {
+      if (logger) {
+        const elapsedSec = Math.round((Date.now() - pollStartMs) / 1000);
+        const dbg = generationState.debug;
+        const debugStr = dbg
+          ? ` turns=${dbg.turnCount} lastAsst=${dbg.lastAssistantFound} copyGlobal=${dbg.copyButtonGlobal} copyInTurn=${dbg.copyButtonInTurn}`
+          : "";
+        logger(
+          `[browser] [poll] state change at ${elapsedSec}s cycle=${pollCycles} stop=${generationState.stopVisible} completion=${generationState.completionVisible}${debugStr}`,
+        );
+      }
+      lastStopVisible = generationState.stopVisible;
+      lastCompletionVisible = generationState.completionVisible;
+    }
+    if (logger && Date.now() >= nextStatusLogAt) {
+      const elapsedSec = Math.round((Date.now() - pollStartMs) / 1000);
+      const remainSec = Math.round((watchdogDeadline - Date.now()) / 1000);
+      const dbg = generationState.debug;
+      const debugStr = dbg
+        ? ` turns=${dbg.turnCount} lastAsst=${dbg.lastAssistantFound} copyGlobal=${dbg.copyButtonGlobal} copyInTurn=${dbg.copyButtonInTurn}`
+        : "";
+      logger(
+        `[browser] [poll] heartbeat at ${elapsedSec}s cycle=${pollCycles} stop=${generationState.stopVisible} completion=${generationState.completionVisible}${debugStr} stableNoStop=${noStopStableCycles} remaining=${remainSec}s`,
+      );
+      nextStatusLogAt = Date.now() + 60_000;
+    }
+    if (!generationState.stopVisible && generationState.completionVisible) {
+      if (logger) {
+        const elapsedSec = Math.round((Date.now() - pollStartMs) / 1000);
+        logger(
+          `[browser] [poll] completion detected at ${elapsedSec}s cycle=${pollCycles} — reading snapshot`,
+        );
+      }
+      done = true;
+      break;
+    }
+    // Fallback: if stop button is gone for 15+ seconds and we have captured
+    // substantial text via partial capture, treat as complete. This handles
+    // cases where ChatGPT's DOM structure changed and the copy button
+    // selector no longer matches.
+    const TEXT_STABILITY_THRESHOLD = 15;
+    const MIN_PARTIAL_CHARS = 200;
+    if (
+      !generationState.stopVisible &&
+      noStopStableCycles >= TEXT_STABILITY_THRESHOLD &&
+      lastPartialText.length >= MIN_PARTIAL_CHARS
+    ) {
+      if (logger) {
+        const elapsedSec = Math.round((Date.now() - pollStartMs) / 1000);
+        logger(
+          `[browser] [poll] fallback completion at ${elapsedSec}s cycle=${pollCycles} — stop gone for ${noStopStableCycles} cycles, partial=${lastPartialText.length} chars`,
+        );
+      }
+      done = true;
+      break;
+    }
+    await delay(pollDelayMs);
+    pollDelayMs = Math.min(pollDelayMs * 2, ASSISTANT_POLL_MAX_DELAY_MS);
   }
-  return null;
+  if (!done || abortSignal?.aborted) {
+    if (logger) {
+      const elapsedSec = Math.round((Date.now() - pollStartMs) / 1000);
+      logger(
+        `[browser] [poll] ${abortSignal?.aborted ? "aborted" : "TIMED OUT"} at ${elapsedSec}s cycle=${pollCycles} stop=${lastStopVisible} completion=${lastCompletionVisible}`,
+      );
+    }
+    return null;
+  }
+  const snapshot = await readAssistantSnapshot(Runtime, minTurnIndex);
+  const result = normalizeAssistantSnapshot(snapshot);
+  if (logger) {
+    logger(
+      `[browser] [poll] snapshot captured — ${result?.text.length ?? 0} chars`,
+    );
+  }
+  return result;
 }
 
-async function isStopButtonVisible(Runtime: ChromeClient["Runtime"]): Promise<boolean> {
-  try {
-    const { result } = await Runtime.evaluate({
-      expression: `Boolean(document.querySelector('${STOP_BUTTON_SELECTOR}'))`,
-      returnByValue: true,
-    });
-    return Boolean(result?.value);
-  } catch {
-    return false;
+async function capturePartialAssistantProgress(
+  Runtime: ChromeClient["Runtime"],
+  logger: BrowserLogger,
+  minTurnIndex: number | undefined,
+  lastPartialText: string,
+): Promise<string> {
+  const snapshot = await readAssistantSnapshot(Runtime, minTurnIndex).catch(() => null);
+  const normalized = normalizeAssistantSnapshot(snapshot);
+  if (!normalized?.text) {
+    return lastPartialText;
   }
+  const text = normalized.text.trim();
+  if (!text || text === lastPartialText) {
+    return lastPartialText;
+  }
+  logger(`[browser] [partial-capture] ${text.length} chars captured — preview: ${text.slice(0, 120).replace(/\n/g, " ")}`);
+  return text;
 }
 
-async function isCompletionVisible(Runtime: ChromeClient["Runtime"]): Promise<boolean> {
+async function readAssistantGenerationUiState(
+  Runtime: ChromeClient["Runtime"],
+): Promise<{
+  stopVisible: boolean;
+  completionVisible: boolean;
+  debug?: { turnCount: number; lastAssistantFound: boolean; copyButtonGlobal: boolean; copyButtonInTurn: boolean };
+}> {
   try {
     const { result } = await Runtime.evaluate({
       expression: `(() => {
-        // Find the LAST assistant turn to check completion status
-        // Must match the same logic as buildAssistantExtractor for consistency
-        const ASSISTANT_SELECTOR = '${ASSISTANT_ROLE_SELECTOR}';
+        const stopVisible = Boolean(document.querySelector(${JSON.stringify(STOP_BUTTON_SELECTOR)}));
+
+        const CONV_SEL = ${JSON.stringify(CONVERSATION_TURN_SELECTOR)};
+        const ASST_SEL = ${JSON.stringify(ASSISTANT_ROLE_SELECTOR)};
+        const FINISH_SEL = ${JSON.stringify(FINISHED_ACTIONS_SELECTOR)};
+
         const isAssistantTurn = (node) => {
           if (!(node instanceof HTMLElement)) return false;
-          const turnAttr = (node.getAttribute('data-turn') || node.dataset?.turn || '').toLowerCase();
-          if (turnAttr === 'assistant') return true;
-          const role = (node.getAttribute('data-message-author-role') || node.dataset?.messageAuthorRole || '').toLowerCase();
+          const turn = (node.getAttribute('data-turn') || '').toLowerCase();
+          if (turn === 'assistant') return true;
+          const role = (node.getAttribute('data-message-author-role') || '').toLowerCase();
           if (role === 'assistant') return true;
-          const testId = (node.getAttribute('data-testid') || '').toLowerCase();
-          if (testId.includes('assistant')) return true;
-          return Boolean(node.querySelector(ASSISTANT_SELECTOR) || node.querySelector('[data-testid*="assistant"]'));
+          const tid = (node.getAttribute('data-testid') || '').toLowerCase();
+          if (tid.includes('assistant')) return true;
+          return Boolean(node.querySelector(ASST_SEL));
         };
 
-        const turns = Array.from(document.querySelectorAll('${CONVERSATION_TURN_SELECTOR}'));
-        let lastAssistantTurn = null;
+        const copyButtonGlobal = Boolean(document.querySelector(FINISH_SEL));
+
+        let completionVisible = false;
+        let lastAssistantFound = false;
+        let copyButtonInTurn = false;
+        const turns = document.querySelectorAll(CONV_SEL);
         for (let i = turns.length - 1; i >= 0; i--) {
           if (isAssistantTurn(turns[i])) {
-            lastAssistantTurn = turns[i];
+            lastAssistantFound = true;
+            copyButtonInTurn = Boolean(turns[i].querySelector(FINISH_SEL));
+            completionVisible = copyButtonInTurn;
             break;
           }
         }
-        if (!lastAssistantTurn) {
-          return false;
+
+        if (!completionVisible && copyButtonGlobal && !stopVisible) {
+          const articles = document.querySelectorAll('article');
+          for (let i = articles.length - 1; i >= 0; i--) {
+            if (articles[i].querySelector(FINISH_SEL)) {
+              completionVisible = true;
+              break;
+            }
+          }
         }
-        // Check if the last assistant turn has finished action buttons (copy, thumbs up/down, share)
-        if (lastAssistantTurn.querySelector('${FINISHED_ACTIONS_SELECTOR}')) {
-          return true;
-        }
-        // Also check for "Done" text in the last assistant turn's markdown
-        const markdowns = lastAssistantTurn.querySelectorAll('.markdown');
-        return Array.from(markdowns).some((n) => (n.textContent || '').trim() === 'Done');
+
+        return {
+          stopVisible,
+          completionVisible,
+          debug: {
+            turnCount: turns.length,
+            lastAssistantFound,
+            copyButtonGlobal,
+            copyButtonInTurn,
+          },
+        };
       })()`,
       returnByValue: true,
     });
-    return Boolean(result?.value);
+    const value = result?.value as
+      | {
+          stopVisible?: unknown;
+          completionVisible?: unknown;
+          debug?: { turnCount: number; lastAssistantFound: boolean; copyButtonGlobal: boolean; copyButtonInTurn: boolean };
+        }
+      | undefined;
+    return {
+      stopVisible: Boolean(value?.stopVisible),
+      completionVisible: Boolean(value?.completionVisible),
+      debug: value?.debug,
+    };
   } catch {
-    return false;
+    return { stopVisible: false, completionVisible: false };
   }
 }
 

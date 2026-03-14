@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -10,6 +10,20 @@ export function getCliVersion(): string {
   }
   cachedVersion = readVersionFromPackage();
   return cachedVersion;
+}
+
+export function getBuildTimestamp(): string {
+  try {
+    const modulePath = fileURLToPath(import.meta.url);
+    const mtime = statSync(modulePath).mtime;
+    return mtime.toISOString();
+  } catch {
+    return "unknown";
+  }
+}
+
+export function getBuildTag(): string {
+  return `${getCliVersion()}+${getBuildTimestamp().replace(/[:.]/g, "").slice(0, 15)}`;
 }
 
 function readVersionFromPackage(): string {

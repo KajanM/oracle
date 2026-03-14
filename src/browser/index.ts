@@ -45,6 +45,7 @@ import { formatElapsed } from "../oracle/format.js";
 import { CHATGPT_URL, CONVERSATION_TURN_SELECTOR, DEFAULT_MODEL_STRATEGY } from "./constants.js";
 import type { LaunchedChrome } from "chrome-launcher";
 import { BrowserAutomationError } from "../oracle/errors.js";
+import { getBuildTag } from "../version.js";
 import { alignPromptEchoPair, buildPromptEchoMatcher } from "./reattachHelpers.js";
 import type { ProfileRunLock } from "./profileState.js";
 import {
@@ -238,10 +239,12 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
       }
       throw error;
     }
+    logger(`[browser] [build] oracle build=${getBuildTag()} pid=${process.pid} chrome_pid=${chrome.pid} port=${chrome.port}`);
     const disconnectPromise = new Promise<never>((_, reject) => {
       client?.on("disconnect", () => {
         connectionClosedUnexpectedly = true;
-        logger("Chrome window closed; attempting to abort run.");
+        const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
+        logger(`[browser] [lifecycle] CDP disconnected after ${elapsedSec}s — chrome_pid=${chrome.pid} port=${chrome.port}`);
         reject(
           new Error(
             "Chrome window closed before oracle finished. Please keep it open until completion.",
@@ -725,6 +728,8 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
       logger("Recovered assistant response after delayed recheck");
       return rechecked;
     };
+    const waitStartMs = Date.now();
+    logger(`[browser] [lifecycle] waiting for assistant response — timeout=${config.timeoutMs}ms baseline_turns=${baselineTurns ?? "none"}`);
     try {
       answer = await raceWithDisconnect(
         waitForAssistantResponseWithReload(
@@ -735,6 +740,8 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
           baselineTurns ?? undefined,
         ),
       );
+      const waitElapsed = Math.round((Date.now() - waitStartMs) / 1000);
+      logger(`[browser] [lifecycle] assistant response captured after ${waitElapsed}s — ${answer.text.length} chars`);
     } catch (error) {
       if (isAssistantResponseTimeoutError(error)) {
         const rechecked = await attemptAssistantRecheck().catch(() => null);
