@@ -18,7 +18,10 @@ import { buildClickDispatcher } from "./domEvents.js";
 const ASSISTANT_POLL_TIMEOUT_ERROR = "assistant-response-watchdog-timeout";
 const ASSISTANT_POLL_INITIAL_DELAY_MS = 200;
 const ASSISTANT_POLL_MAX_DELAY_MS = 1_000;
-const ASSISTANT_PARTIAL_CAPTURE_INTERVAL_MS = 120_000;
+const ASSISTANT_PARTIAL_CAPTURE_INTERVAL_MS = 15_000;
+const CONSECUTIVE_EVAL_FAILURE_LIMIT = 20;
+const TEXT_STABILITY_THRESHOLD = 15;
+const MIN_PARTIAL_CHARS = 200;
 
 function isAnswerNowPlaceholderText(normalized: string): boolean {
   const text = normalized.trim();
@@ -405,6 +408,7 @@ async function pollAssistantCompletion(
   let lastStopVisible = false;
   let lastCompletionVisible = false;
   let noStopStableCycles = 0;
+  let consecutiveEvalFailures = 0;
   if (logger) {
     logger(`[browser] [poll] start — timeout=${timeoutMs}ms minTurn=${minTurnIndex ?? "none"}`);
   }
@@ -415,16 +419,17 @@ async function pollAssistantCompletion(
       }
       return null;
     }
-    if (logger && Date.now() >= nextPartialCaptureAt) {
+    if (Date.now() >= nextPartialCaptureAt) {
       try {
         lastPartialText = await capturePartialAssistantProgress(
           Runtime,
-          logger,
+          logger ?? (() => {}),
           minTurnIndex,
           lastPartialText,
         );
+        consecutiveEvalFailures = 0;
       } catch {
-        // Best-effort partial capture — keep completion polling alive.
+        consecutiveEvalFailures += 1;
       } finally {
         nextPartialCaptureAt = Date.now() + ASSISTANT_PARTIAL_CAPTURE_INTERVAL_MS;
       }
@@ -436,31 +441,72 @@ async function pollAssistantCompletion(
     };
     try {
       generationState = await readAssistantGenerationUiState(Runtime);
+      consecutiveEvalFailures = 0;
     } catch (evalError) {
+      consecutiveEvalFailures += 1;
       if (logger) {
         const msg = evalError instanceof Error ? evalError.message : String(evalError);
-        logger(`[browser] [poll] Runtime.evaluate FAILED cycle=${pollCycles} error=${msg.slice(0, 200)}`);
+        logger(`[browser] [poll] Runtime.evaluate FAILED cycle=${pollCycles} consecutive=${consecutiveEvalFailures} error=${msg.slice(0, 200)}`);
       }
       generationState = { stopVisible: false, completionVisible: false };
     }
     pollCycles += 1;
 
     // When stop button disappears, immediately capture text for fallback detection
-    if (!generationState.stopVisible && lastStopVisible && logger) {
+    if (!generationState.stopVisible && lastStopVisible) {
       try {
         lastPartialText = await capturePartialAssistantProgress(
-          Runtime, logger, minTurnIndex, lastPartialText,
+          Runtime, logger ?? (() => {}), minTurnIndex, lastPartialText,
         );
       } catch {
         // best-effort
       }
     }
 
-    // Track text stability for fallback completion detection
-    if (!generationState.stopVisible && lastPartialText.length > 0) {
+    // Track cycles where stop button is absent. The counter increments
+    // regardless of whether partial text has been captured — the fallback
+    // check at the bottom still requires MIN_PARTIAL_CHARS to fire, but
+    // decoupling the counter from text avoids a 2-minute dead zone where
+    // the counter resets every cycle before the first partial capture.
+    if (!generationState.stopVisible) {
       noStopStableCycles += 1;
     } else {
       noStopStableCycles = 0;
+    }
+
+    // When the counter is accumulating but we have no text yet,
+    // trigger an early partial capture to populate lastPartialText
+    // so the fallback threshold can be evaluated.
+    if (noStopStableCycles >= 5 && lastPartialText.length === 0) {
+      try {
+        lastPartialText = await capturePartialAssistantProgress(
+          Runtime, logger ?? (() => {}), minTurnIndex, lastPartialText,
+        );
+      } catch {
+        // best-effort
+      }
+    }
+
+    // If Runtime.evaluate has failed many times in a row, Chrome is likely
+    // under severe resource pressure or disconnected. Attempt one final
+    // snapshot capture and treat it as complete if we get any text.
+    if (consecutiveEvalFailures >= CONSECUTIVE_EVAL_FAILURE_LIMIT) {
+      if (logger) {
+        logger(`[browser] [poll] ${consecutiveEvalFailures} consecutive eval failures — attempting final snapshot capture`);
+      }
+      try {
+        const snapshot = await readAssistantSnapshot(Runtime, minTurnIndex);
+        const result = normalizeAssistantSnapshot(snapshot);
+        if (result && result.text.length >= MIN_PARTIAL_CHARS) {
+          if (logger) {
+            logger(`[browser] [poll] recovered ${result.text.length} chars after eval failure streak — treating as complete`);
+          }
+          return result;
+        }
+      } catch {
+        // final attempt failed too
+      }
+      consecutiveEvalFailures = 0;
     }
 
     if (
@@ -506,8 +552,6 @@ async function pollAssistantCompletion(
     // substantial text via partial capture, treat as complete. This handles
     // cases where ChatGPT's DOM structure changed and the copy button
     // selector no longer matches.
-    const TEXT_STABILITY_THRESHOLD = 15;
-    const MIN_PARTIAL_CHARS = 200;
     if (
       !generationState.stopVisible &&
       noStopStableCycles >= TEXT_STABILITY_THRESHOLD &&
