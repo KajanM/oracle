@@ -314,6 +314,7 @@ export async function closeTab(
 function buildChromeFlags(headless: boolean, debugBindAddress?: string | null): string[] {
   const flags = [
     "--disable-background-networking",
+    "--disable-background-timer-throttling",
     "--disable-client-side-phishing-detection",
     "--disable-default-apps",
     "--disable-hang-monitor",
@@ -338,10 +339,6 @@ function buildChromeFlags(headless: boolean, debugBindAddress?: string | null): 
 
   if (process.platform === "linux") {
     flags.push("--disable-dev-shm-usage");
-  }
-
-  if (process.env.ORACLE_DISABLE_BG_THROTTLE === "1") {
-    flags.push("--disable-background-timer-throttling");
   }
 
   if (process.platform !== "win32" && !isWsl()) {

@@ -22,6 +22,7 @@ const ASSISTANT_PARTIAL_CAPTURE_INTERVAL_MS = 15_000;
 const CONSECUTIVE_EVAL_FAILURE_LIMIT = 20;
 const TEXT_STABILITY_THRESHOLD = 15;
 const MIN_PARTIAL_CHARS = 200;
+const SECOND_POLLER_MAX_TIMEOUT_MS = 120_000;
 
 function isAnswerNowPlaceholderText(normalized: string): boolean {
   const text = normalized.trim();
@@ -164,9 +165,14 @@ export async function waitForAssistantResponse(
     const generationState = await readAssistantGenerationUiState(Runtime);
     if (generationState.stopVisible) {
       logger("Assistant still generating; waiting for completion");
-      const completed = await pollAssistantCompletion(Runtime, remainingMs, minTurnIndex, undefined, logger);
-      if (completed) {
-        return completed;
+      const secondPollerTimeout = Math.min(remainingMs, SECOND_POLLER_MAX_TIMEOUT_MS);
+      try {
+        const completed = await pollAssistantCompletion(Runtime, secondPollerTimeout, minTurnIndex, undefined, logger);
+        if (completed) {
+          return completed;
+        }
+      } catch (pollerError) {
+        logger(`Second poller failed (CDP disconnect?); returning already-captured candidate (${candidate.text.length} chars)`);
       }
     }
   }
@@ -463,11 +469,6 @@ async function pollAssistantCompletion(
       }
     }
 
-    // Track cycles where stop button is absent. The counter increments
-    // regardless of whether partial text has been captured — the fallback
-    // check at the bottom still requires MIN_PARTIAL_CHARS to fire, but
-    // decoupling the counter from text avoids a 2-minute dead zone where
-    // the counter resets every cycle before the first partial capture.
     if (!generationState.stopVisible) {
       noStopStableCycles += 1;
     } else {
