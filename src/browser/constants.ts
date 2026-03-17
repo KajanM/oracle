@@ -55,7 +55,11 @@ export const FILE_INPUT_SELECTORS = [
 // Legacy single selectors kept for compatibility with older call-sites
 export const FILE_INPUT_SELECTOR = FILE_INPUT_SELECTORS[0];
 export const GENERIC_FILE_INPUT_SELECTOR = FILE_INPUT_SELECTORS[3];
-export const MENU_CONTAINER_SELECTOR = '[role="menu"], [data-radix-collection-root]';
+// ChatGPT has moved between Radix patterns; keep surfaces broad so we detect an open picker
+// and scan options without toggling the trigger closed.
+export const MENU_CONTAINER_SELECTOR =
+  '[role="menu"], [data-radix-collection-root], [data-radix-dropdown-menu-content], ' +
+  '[data-radix-menu-content], [data-radix-select-content], [data-radix-popper-content-wrapper]';
 export const MENU_ITEM_SELECTOR =
   'button, [role="menuitem"], [role="menuitemradio"], [data-testid*="model-switcher-"]';
 export const UPLOAD_STATUS_SELECTORS = [

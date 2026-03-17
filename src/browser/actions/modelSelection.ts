@@ -6,39 +6,662 @@ import {
 } from "../constants.js";
 import { logDomFailure } from "../domDebug.js";
 import { buildClickDispatcher } from "./domEvents.js";
+import {
+  logModelPickerCompactProbe,
+  logModelPickerDomProbe,
+  shouldLogModelPickerDomProbe,
+} from "../modelPickerProbe.js";
+
+/** If the model dropdown stays open it covers the composer; dismiss aggressively. */
+export function buildForceDismissModelPickerExpression(): string {
+  const sel = JSON.stringify(MODEL_BUTTON_SELECTOR);
+  return `(() => {
+    ${buildClickDispatcher("dispatchClickSequence")}
+    const btn = document.querySelector(${sel});
+    ${buildPickModelPickerMenuJs()}
+    const menuOpen = () =>
+      Boolean(btn?.getAttribute("aria-expanded") === "true" || pickModelPickerMenu());
+    if (!btn) {
+      return { dismissed: true, reason: "no-button" };
+    }
+    if (!menuOpen()) {
+      return { dismissed: true };
+    }
+    const esc = (t) => {
+      try {
+        t?.dispatchEvent(
+          new KeyboardEvent("keydown", {
+            key: "Escape",
+            code: "Escape",
+            keyCode: 27,
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+      } catch {}
+    };
+    for (let round = 0; round < 8 && menuOpen(); round++) {
+      esc(pickModelPickerMenu());
+      esc(document.activeElement);
+      esc(document.body);
+      if (menuOpen()) {
+        try {
+          btn.click();
+        } catch {}
+        try {
+          dispatchClickSequence(btn);
+        } catch {}
+      }
+    }
+    return {
+      dismissed: !menuOpen(),
+      ariaExpanded: btn.getAttribute("aria-expanded"),
+      rounds: 8,
+    };
+  })()`;
+}
+
+export async function forceDismissOpenModelPicker(
+  Runtime: ChromeClient["Runtime"],
+  logger: BrowserLogger,
+): Promise<void> {
+  try {
+    const { result } = await Runtime.evaluate({
+      expression: buildForceDismissModelPickerExpression(),
+      returnByValue: true,
+    });
+    const v = result?.value as { dismissed?: boolean; ariaExpanded?: string | null } | undefined;
+    if (v && !v.dismissed && shouldLogModelPickerDomProbe(logger)) {
+      logger(
+        `[browser] [model] warn: model picker may still be open (aria-expanded=${v.ariaExpanded ?? "?"})`,
+      );
+    }
+  } catch (e) {
+    logger(`[browser] [model] warn: force-dismiss model picker failed: ${e instanceof Error ? e.message : e}`);
+  }
+}
+
+const CDP_ESCAPE_KEYS = {
+  windowsVirtualKeyCode: 27,
+  nativeVirtualKeyCode: 27,
+  code: "Escape",
+  key: "Escape",
+} as const;
+
+/**
+ * Root cause: document.querySelector('[role="menu"]') is often the WRONG menu (sidebar / hidden
+ * portal). Pick the visible menu under the model trigger that contains model-switcher-* nodes.
+ */
+export function buildPickModelPickerMenuJs(): string {
+  return `
+    const pickModelPickerMenu = () => {
+      const trigger = document.querySelector('[data-testid="model-switcher-dropdown-button"]');
+      const tr = trigger?.getBoundingClientRect();
+      if (!tr) return null;
+      const visible = [...document.querySelectorAll('[role="menu"]')].filter((m) => {
+        const r = m.getBoundingClientRect();
+        return r.width > 36 && r.height > 36;
+      });
+      if (visible.length === 0) return null;
+      let best = visible[0];
+      let bestScore = -1;
+      for (const m of visible) {
+        const r = m.getBoundingClientRect();
+        let s = 0;
+        if (m.querySelector('[data-testid^="model-switcher"]')) s += 1000000;
+        if (m.querySelector('[data-testid*="model-switcher"][data-testid*="pro"]')) s += 200000;
+        if (r.top >= tr.top - 50) s += 10000;
+        if (Math.abs(r.left - tr.left) < 420) s += 5000;
+        s += (r.width * r.height) / 400;
+        if (s > bestScore) {
+          bestScore = s;
+          best = m;
+        }
+      }
+      return best;
+    };
+  `;
+}
+
+/** In-page: click Pro row in the *model* menu only; returns whether menu is gone. */
+export function buildClickProRowToCloseMenuExpression(): string {
+  return `(() => {
+    ${buildPickModelPickerMenuJs()}
+    const isOpen = () =>
+      document.querySelector('[data-testid="model-switcher-dropdown-button"]')?.getAttribute('aria-expanded') === 'true' ||
+      !!pickModelPickerMenu();
+    if (!isOpen()) return { closed: true };
+
+    let menu = pickModelPickerMenu();
+    if (!menu) {
+      menu =
+        [...document.querySelectorAll('[role="menu"]')].find((m) => {
+          const r = m.getBoundingClientRect();
+          return r.width > 28 && r.height > 28;
+        }) ?? null;
+    }
+    if (!menu) return { closed: true, err: 'no-menu' };
+
+    const tap = (el) => {
+      try {
+        if (el instanceof HTMLElement) el.click();
+      } catch {}
+    };
+
+    const selectors = [
+      '[data-testid="model-switcher-gpt-5-4-pro"]',
+      '[data-testid="model-switcher-gpt-5-2-pro"]',
+      '[data-testid*="model-switcher-gpt"][data-testid*="-pro"]',
+      '[data-testid*="model-switcher"][data-testid*="pro"]',
+    ];
+    for (const sel of selectors) {
+      const el = menu.querySelector(sel);
+      if (el) {
+        tap(el);
+        if (!isOpen()) return { closed: true, via: sel };
+      }
+    }
+
+    for (const el of menu.querySelectorAll('[role="menuitem"]')) {
+      const text = (el.textContent || '').replace(/\\s+/g, ' ').trim();
+      if (/^Pro(\\s|$)/i.test(text) || /Research-grade/i.test(text)) {
+        tap(el);
+        if (!isOpen()) return { closed: true, via: 'menuitem-pro' };
+      }
+    }
+
+    return { closed: !isOpen(), err: 'pro-click-no-close' };
+  })()`;
+}
+
+async function cdpClickAt(
+  input: ChromeClient["Input"],
+  x: number,
+  y: number,
+): Promise<void> {
+  await input.dispatchMouseEvent({ type: "mouseMoved", x, y });
+  await input.dispatchMouseEvent({ type: "mousePressed", x, y, button: "left", clickCount: 1 });
+  await input.dispatchMouseEvent({ type: "mouseReleased", x, y, button: "left", clickCount: 1 });
+}
+
+/**
+ * Proven stuck: menu open over composer. Try Pro row click, then trusted outside-click + Escape.
+ */
+export async function logModelMenuDiagnostics(
+  Runtime: ChromeClient["Runtime"],
+  logger: BrowserLogger,
+  phase: string,
+): Promise<void> {
+  try {
+    const { result } = await Runtime.evaluate({
+      expression: `(() => {
+        const t = document.querySelector('[data-testid="model-switcher-dropdown-button"]');
+        ${buildPickModelPickerMenuJs().replace(/\n/g, " ")}
+        const pm = pickModelPickerMenu();
+        const pr = pm?.getBoundingClientRect();
+        const all = [...document.querySelectorAll('[role="menu"]')].map((m) => {
+          const r = m.getBoundingClientRect();
+          return {
+            area: Math.round(r.width * r.height),
+            switcher: !!m.querySelector('[data-testid^="model-switcher"]'),
+          };
+        });
+        return {
+          phase: ${JSON.stringify(phase)},
+          ariaExpanded: t?.getAttribute("aria-expanded") ?? null,
+          roleMenuCount: all.length,
+          pickedMenuArea: pr ? Math.round(pr.width * pr.height) : 0,
+          pickedHasSwitcher: pm ? !!pm.querySelector('[data-testid^="model-switcher"]') : false,
+          menus: all,
+        };
+      })()`,
+      returnByValue: true,
+    });
+    logger(`[browser] [model] diagnostic ${JSON.stringify(result?.value)}`);
+  } catch {
+    /* ignore */
+  }
+}
+
+export async function closeOpenModelMenuBestEffort(
+  Runtime: ChromeClient["Runtime"],
+  input: ChromeClient["Input"] | undefined,
+  logger: BrowserLogger,
+): Promise<void> {
+  await logModelMenuDiagnostics(Runtime, logger, "before-close-menu");
+  for (let wave = 0; wave < 4; wave++) {
+    try {
+      const { result } = await Runtime.evaluate({
+        expression: buildClickProRowToCloseMenuExpression(),
+        returnByValue: true,
+      });
+      if ((result?.value as { closed?: boolean })?.closed) {
+        return;
+      }
+    } catch {
+      /* ignore */
+    }
+
+    if (input && typeof input.dispatchMouseEvent === "function") {
+      try {
+        const { result: ptRes } = await Runtime.evaluate({
+          expression: `(() => {
+            ${buildPickModelPickerMenuJs().replace(/\n/g, " ")}
+            const m = pickModelPickerMenu();
+            const w = window.innerWidth;
+            const h = window.innerHeight;
+            if (!m) return [];
+            const r = m.getBoundingClientRect();
+            const right = Math.min(w - 16, Math.max(r.right + 40, w * 0.52));
+            const midY = Math.min(h - 100, Math.max(80, r.top + r.height * 0.35));
+            return [
+              { x: Math.round(right), y: Math.round(midY) },
+              { x: Math.round(w * 0.5), y: Math.round(h - 72) },
+            ];
+          })()`,
+          returnByValue: true,
+        });
+        const pts = ptRes?.value as Array<{ x: number; y: number }> | undefined;
+        if (Array.isArray(pts)) {
+          for (const p of pts) {
+            if (typeof p?.x === "number" && typeof p?.y === "number") {
+              await cdpClickAt(input, p.x, p.y);
+            }
+          }
+        }
+      } catch (e) {
+        logger(`[browser] [model] menu CDP click: ${e instanceof Error ? e.message : e}`);
+      }
+
+      try {
+        await input.dispatchKeyEvent({ type: "keyDown", ...CDP_ESCAPE_KEYS });
+        await input.dispatchKeyEvent({ type: "keyUp", ...CDP_ESCAPE_KEYS });
+      } catch {
+        /* ignore */
+      }
+    }
+
+    await new Promise((r) => setTimeout(r, 90));
+  }
+  await logModelMenuDiagnostics(Runtime, logger, "after-close-menu");
+}
+
+async function openModelPickerTrusted(
+  Runtime: ChromeClient["Runtime"],
+  input: ChromeClient["Input"] | undefined,
+): Promise<boolean> {
+  if (!input || typeof input.dispatchMouseEvent !== "function") {
+    return false;
+  }
+  const { result } = await Runtime.evaluate({
+    expression: `(() => {
+      const btn = document.querySelector('${MODEL_BUTTON_SELECTOR}');
+      if (!(btn instanceof HTMLElement)) return { ok: false };
+      const expanded = btn.getAttribute('aria-expanded') === 'true';
+      const hasMenu = Boolean(document.querySelector('[role="menu"] [data-testid^="model-switcher-"]'));
+      if (expanded || hasMenu) {
+        return { ok: false, skip: true };
+      }
+      const rect = btn.getBoundingClientRect();
+      if (rect.width < 4 || rect.height < 4) return { ok: false };
+      return {
+        ok: true,
+        x: rect.left + rect.width / 2,
+        y: rect.top + rect.height / 2,
+      };
+    })()`,
+    returnByValue: true,
+  });
+  const point = result?.value as { ok?: boolean; x?: number; y?: number; skip?: boolean } | undefined;
+  if (!point?.ok || typeof point.x !== "number" || typeof point.y !== "number") {
+    return Boolean(point?.skip);
+  }
+  await input.dispatchMouseEvent({ type: "mouseMoved", x: point.x, y: point.y });
+  await input.dispatchMouseEvent({
+    type: "mousePressed",
+    x: point.x,
+    y: point.y,
+    button: "left",
+    clickCount: 1,
+  });
+  await input.dispatchMouseEvent({
+    type: "mouseReleased",
+    x: point.x,
+    y: point.y,
+    button: "left",
+    clickCount: 1,
+  });
+  const deadline = Date.now() + 750;
+  while (Date.now() < deadline) {
+    const probe = await Runtime.evaluate({
+      expression: `(() => {
+        const btn = document.querySelector('${MODEL_BUTTON_SELECTOR}');
+        return Boolean(
+          btn?.getAttribute('aria-expanded') === 'true' ||
+            document.querySelector('[role="menu"] [data-testid^="model-switcher-"]'),
+        );
+      })()`,
+      returnByValue: true,
+    });
+    if (probe?.result?.value === true) {
+      return true;
+    }
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return false;
+}
+
+function buildModelStateProbeExpression(targetModel: string): string {
+  const targetLiteral = JSON.stringify(targetModel);
+  return `(() => {
+    const normalizeText = (value) => {
+      if (!value) return '';
+      return value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\\s+/g, ' ').trim();
+    };
+    const target = normalizeText(${targetLiteral});
+    const header = (document.querySelector('${MODEL_BUTTON_SELECTOR}')?.textContent ?? '').trim();
+    const footer = (document.querySelector('[data-testid=\"composer-footer-actions\"]')?.textContent ?? '').trim();
+    const normalizedHeader = normalizeText(header);
+    const normalizedFooter = normalizeText(footer);
+    const wantsPro = target === 'pro';
+    const alreadySelected = wantsPro
+      ? normalizedFooter.includes('extended pro') || normalizedFooter === 'pro'
+      : Boolean(target && normalizedHeader.includes(target));
+    return { target, header, footer, alreadySelected };
+  })()`;
+}
+
+function buildTrustedModelProbeExpression(targetModel: string): string {
+  const matchers = buildModelMatchersLiteral(targetModel);
+  const labelLiteral = JSON.stringify(matchers.labelTokens);
+  const idLiteral = JSON.stringify(matchers.testIdTokens);
+  const primaryLabelLiteral = JSON.stringify(targetModel);
+  return `(() => {
+    ${buildPickModelPickerMenuJs()}
+    const LABEL_TOKENS = ${labelLiteral};
+    const TEST_IDS = ${idLiteral};
+    const PRIMARY_LABEL = ${primaryLabelLiteral};
+    const normalizeText = (value) => {
+      if (!value) return '';
+      return value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\\s+/g, ' ').trim();
+    };
+    const menu = pickModelPickerMenu();
+    const button = document.querySelector('${MODEL_BUTTON_SELECTOR}');
+    const buttonLabel = (button?.textContent ?? '').trim();
+    const menuOpen = Boolean(menu);
+    if (!menu) {
+      return { menuOpen, buttonLabel, availableOptions: [] };
+    }
+    const normalizedTarget = normalizeText(PRIMARY_LABEL);
+    const simpleTarget = ['pro', 'thinking', 'auto', 'instant'].includes(normalizedTarget)
+      ? normalizedTarget
+      : null;
+    const normalizedTokens = Array.from(new Set([normalizedTarget, ...LABEL_TOKENS]))
+      .map((token) => normalizeText(token))
+      .filter(Boolean);
+    const score = (node) => {
+      const text = normalizeText(node?.textContent ?? '');
+      const testid = (node?.getAttribute?.('data-testid') ?? '').toLowerCase();
+      let total = 0;
+      if (simpleTarget) {
+        if (text === simpleTarget) total += 2000;
+        else if (text.startsWith(simpleTarget + ' ')) total += 1800;
+        else if (text.includes(simpleTarget)) total += 900;
+      }
+      const exactMatch = TEST_IDS.find((id) => id && testid === id);
+      if (exactMatch) total += 1500;
+      else {
+        const hits = TEST_IDS.filter((id) => id && testid.includes(id));
+        if (hits.length > 0) total += 500;
+      }
+      if (normalizedTarget && text.includes(normalizedTarget)) total += 500;
+      for (const token of normalizedTokens) {
+        if (token && text.includes(token)) total += Math.min(120, Math.max(10, token.length * 4));
+      }
+      if (text.includes('configure')) total -= 1000;
+      return Math.max(total, 0);
+    };
+    let match = null;
+    const options = Array.from(
+      menu.querySelectorAll('button, [role="menuitem"], [role="menuitemradio"], [data-testid*="model-switcher-"]'),
+    );
+    const availableOptions = options
+      .map((node) => (node?.textContent ?? '').trim())
+      .filter(Boolean)
+      .filter((label, index, arr) => arr.indexOf(label) === index)
+      .slice(0, 12);
+    for (const option of options) {
+      const optionScore = score(option);
+      if (optionScore <= 0 || !(option instanceof HTMLElement)) continue;
+      const rect = option.getBoundingClientRect();
+      if (rect.width < 4 || rect.height < 4) continue;
+      const selected =
+        option.getAttribute('aria-checked') === 'true' ||
+        option.getAttribute('aria-selected') === 'true' ||
+        option.getAttribute('aria-current') === 'true' ||
+        option.getAttribute('data-selected') === 'true' ||
+        Boolean(option.querySelector('[data-testid*="check"], [role="img"][data-icon="check"], svg[data-icon="check"]'));
+      if (!match || optionScore > match.score) {
+        match = {
+          score: optionScore,
+          label: (option.textContent ?? '').trim(),
+          selected,
+          x: rect.left + rect.width / 2,
+          y: rect.top + rect.height / 2,
+        };
+      }
+    }
+    if (!match && simpleTarget) {
+      for (const node of menu.querySelectorAll('*')) {
+        if (!(node instanceof HTMLElement)) continue;
+        const text = normalizeText(node.textContent ?? '');
+        if (!text) continue;
+        const textLooksRight =
+          text === simpleTarget ||
+          text.startsWith(simpleTarget + ' ') ||
+          text.includes(simpleTarget) ||
+          (simpleTarget === 'pro' && text.includes('research grade'));
+        if (!textLooksRight) continue;
+        const clickable =
+          node.closest('[role="menuitem"], [role="menuitemradio"], button, [data-testid*="model-switcher"]') ??
+          node;
+        if (!(clickable instanceof HTMLElement)) continue;
+        const rect = clickable.getBoundingClientRect();
+        if (rect.width < 4 || rect.height < 4) continue;
+        const selected =
+          clickable.getAttribute('aria-checked') === 'true' ||
+          clickable.getAttribute('aria-selected') === 'true' ||
+          clickable.getAttribute('aria-current') === 'true' ||
+          clickable.getAttribute('data-selected') === 'true' ||
+          Boolean(clickable.querySelector('[data-testid*="check"], [role="img"][data-icon="check"], svg[data-icon="check"]'));
+        match = {
+          score: 2500,
+          label: (clickable.textContent ?? '').trim(),
+          selected,
+          x: rect.left + rect.width / 2,
+          y: rect.top + rect.height / 2,
+        };
+        break;
+      }
+    }
+    return { menuOpen, buttonLabel, availableOptions, match };
+  })()`;
+}
+
+function buildButtonMatchProbeExpression(targetModel: string): string {
+  const primaryLabelLiteral = JSON.stringify(targetModel);
+  return `(() => {
+    const normalizeText = (value) => {
+      if (!value) return '';
+      return value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\\s+/g, ' ').trim();
+    };
+    const target = normalizeText(${primaryLabelLiteral});
+    const label = (document.querySelector('${MODEL_BUTTON_SELECTOR}')?.textContent ?? '').trim();
+    const normalized = normalizeText(label);
+    const footer = (document.querySelector('[data-testid="composer-footer-actions"]')?.textContent ?? '').trim();
+    const normalizedFooter = normalizeText(footer);
+    const wantsPro = target === 'pro';
+    return {
+      label,
+      footer,
+      matches: wantsPro
+        ? normalizedFooter.includes('extended pro') || normalizedFooter === 'pro'
+        : Boolean(target && normalized && normalized.includes(target)),
+      menuOpen: Boolean(document.querySelector('[role="menu"] [data-testid^="model-switcher-"]')),
+    };
+  })()`;
+}
+
+async function selectModelViaTrustedClicks(
+  Runtime: ChromeClient["Runtime"],
+  input: ChromeClient["Input"],
+  desiredModel: string,
+): Promise<
+  | { status: "already-selected"; label?: string | null; modelPickerInstrumentation?: { reopenTriggerClicks: number } }
+  | { status: "switched"; label?: string | null; modelPickerInstrumentation?: { reopenTriggerClicks: number } }
+  | { status: "option-not-found"; hint?: { temporaryChat?: boolean; availableOptions?: string[] }; modelPickerInstrumentation?: { reopenTriggerClicks: number } }
+  | { status: "menu-not-open"; modelPickerInstrumentation?: { reopenTriggerClicks: number } }
+> {
+  const opened = await openModelPickerTrusted(Runtime, input);
+  if (!opened) {
+    return { status: "menu-not-open", modelPickerInstrumentation: { reopenTriggerClicks: 0 } };
+  }
+
+  let lastAvailable: string[] = [];
+  const deadline = Date.now() + 900;
+  while (Date.now() < deadline) {
+    const { result } = await Runtime.evaluate({
+      expression: buildTrustedModelProbeExpression(desiredModel),
+      returnByValue: true,
+    });
+    const probe = result?.value as
+      | {
+          menuOpen?: boolean;
+          buttonLabel?: string;
+          availableOptions?: string[];
+          match?: { label?: string; selected?: boolean; x?: number; y?: number };
+        }
+      | undefined;
+    lastAvailable = probe?.availableOptions ?? lastAvailable;
+    const match = probe?.match;
+    if (match && typeof match.x === "number" && typeof match.y === "number") {
+      await cdpClickAt(input, match.x, match.y);
+      if (match.selected) {
+        return {
+          status: "already-selected",
+          label: match.label,
+          modelPickerInstrumentation: { reopenTriggerClicks: 0 },
+        };
+      }
+      const labelDeadline = Date.now() + 1200;
+      while (Date.now() < labelDeadline) {
+        const { result: buttonResult } = await Runtime.evaluate({
+          expression: buildButtonMatchProbeExpression(desiredModel),
+          returnByValue: true,
+        });
+        const buttonProbe = buttonResult?.value as
+          | { label?: string; matches?: boolean; menuOpen?: boolean }
+          | undefined;
+        if (buttonProbe?.matches) {
+          return {
+            status: "switched",
+            label: buttonProbe.label,
+            modelPickerInstrumentation: { reopenTriggerClicks: 0 },
+          };
+        }
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      return {
+        status: "option-not-found",
+        hint: { availableOptions: lastAvailable },
+        modelPickerInstrumentation: { reopenTriggerClicks: 0 },
+      };
+    }
+    if (probe && probe.menuOpen === false) {
+      return {
+        status: "menu-not-open",
+        modelPickerInstrumentation: { reopenTriggerClicks: 0 },
+      };
+    }
+    await new Promise((r) => setTimeout(r, 45));
+  }
+
+  return {
+    status: "option-not-found",
+    hint: { availableOptions: lastAvailable },
+    modelPickerInstrumentation: { reopenTriggerClicks: 0 },
+  };
+}
 
 export async function ensureModelSelection(
   Runtime: ChromeClient["Runtime"],
   desiredModel: string,
   logger: BrowserLogger,
   strategy: BrowserModelStrategy = "select",
+  input?: ChromeClient["Input"],
 ) {
-  const outcome = await Runtime.evaluate({
-    expression: buildModelSelectionExpression(desiredModel, strategy),
-    awaitPromise: true,
+  logger(`[browser] [model] opening model picker`);
+  await logModelPickerDomProbe(Runtime, logger, "before-model-select");
+  const { result: stateResult } = await Runtime.evaluate({
+    expression: buildModelStateProbeExpression(desiredModel),
     returnByValue: true,
   });
-
-  const result = outcome.result?.value as
-    | { status: "already-selected"; label?: string | null }
-    | { status: "switched"; label?: string | null }
-    | { status: "switched-best-effort"; label?: string | null }
+  const stateProbe = stateResult?.value as
+    | { header?: string; footer?: string; alreadySelected?: boolean }
+    | undefined;
+  if (stateProbe?.alreadySelected) {
+    const label = stateProbe.footer || stateProbe.header || desiredModel;
+    logger(`[browser] [model] selected: ${label}`);
+    logger(`[browser] [model] selection complete`);
+    return;
+  }
+  const canTrustedOpen = Boolean(input && typeof input.dispatchMouseEvent === "function");
+  const trustedResult =
+    canTrustedOpen && strategy === "select" && input
+      ? await selectModelViaTrustedClicks(Runtime, input, desiredModel)
+      : null;
+  const result = trustedResult
+    ? trustedResult
+    : ((await Runtime.evaluate({
+        expression: buildModelSelectionExpression(desiredModel, strategy, false),
+        awaitPromise: true,
+        returnByValue: true,
+      })).result?.value as
+    | { status: "already-selected"; label?: string | null; modelPickerInstrumentation?: { reopenTriggerClicks: number } }
+    | { status: "switched"; label?: string | null; modelPickerInstrumentation?: { reopenTriggerClicks: number } }
+    | { status: "switched-best-effort"; label?: string | null; modelPickerInstrumentation?: { reopenTriggerClicks: number } }
     | {
         status: "option-not-found";
         hint?: { temporaryChat?: boolean; availableOptions?: string[] };
+        modelPickerInstrumentation?: { reopenTriggerClicks: number };
       }
-    | { status: "button-missing" }
-    | undefined;
+    | { status: "menu-not-open"; modelPickerInstrumentation?: { reopenTriggerClicks: number } }
+    | { status: "button-missing"; modelPickerInstrumentation?: { reopenTriggerClicks: number } }
+    | undefined);
+
+  const reopen = result?.modelPickerInstrumentation?.reopenTriggerClicks ?? 0;
+  if (reopen > 0) {
+    logger(
+      `[browser] [model] warning: model trigger re-clicked ${reopen} time(s) while selecting (site may not expose open menu state; menu can flicker). Use ORACLE_BROWSER_MODEL_DEBUG=1 or --verbose for dom-probe.`,
+    );
+  }
 
   switch (result?.status) {
     case "already-selected":
     case "switched":
     case "switched-best-effort": {
       const label = result.label ?? desiredModel;
-      logger(`Model picker: ${label}`);
+      logger(`[browser] [model] selected: ${label}`);
+      logger(`[browser] [model] selection complete`);
+      await forceDismissOpenModelPicker(Runtime, logger);
+      await logModelPickerDomProbe(Runtime, logger, "after-model-select");
       return;
     }
     case "option-not-found": {
+      logger(`[browser] [model] selection complete (option-not-found)`);
+      await forceDismissOpenModelPicker(Runtime, logger);
+      await logModelPickerCompactProbe(Runtime, logger);
+      await logModelPickerDomProbe(Runtime, logger, "model-select-failed");
       await logDomFailure(Runtime, logger, "model-switcher-option");
       const isTemporary = result.hint?.temporaryChat ?? false;
       const available = (result.hint?.availableOptions ?? []).filter(Boolean);
@@ -51,7 +674,17 @@ export async function ensureModelSelection(
         `Unable to find model option matching "${desiredModel}" in the model switcher.${availableHint}${tempHint}`,
       );
     }
+    case "menu-not-open": {
+      logger(`[browser] [model] selection complete (menu-not-open)`);
+      await logModelPickerCompactProbe(Runtime, logger);
+      await logModelPickerDomProbe(Runtime, logger, "model-select-failed");
+      throw new Error("ChatGPT model picker closed before options could be read.");
+    }
     default: {
+      logger(`[browser] [model] selection complete (button-missing)`);
+      await forceDismissOpenModelPicker(Runtime, logger);
+      await logModelPickerCompactProbe(Runtime, logger);
+      await logModelPickerDomProbe(Runtime, logger, "model-select-failed");
       await logDomFailure(Runtime, logger, "model-switcher-button");
       throw new Error("Unable to locate the ChatGPT model selector button.");
     }
@@ -65,24 +698,47 @@ export async function ensureModelSelection(
 function buildModelSelectionExpression(
   targetModel: string,
   strategy: BrowserModelStrategy,
+  trustedOpenStarted = false,
 ): string {
   const matchers = buildModelMatchersLiteral(targetModel);
   const labelLiteral = JSON.stringify(matchers.labelTokens);
   const idLiteral = JSON.stringify(matchers.testIdTokens);
   const primaryLabelLiteral = JSON.stringify(targetModel);
   const strategyLiteral = JSON.stringify(strategy);
+  const trustedOpenLiteral = JSON.stringify(trustedOpenStarted);
   const menuContainerLiteral = JSON.stringify(MENU_CONTAINER_SELECTOR);
   const menuItemLiteral = JSON.stringify(MENU_ITEM_SELECTOR);
   return `(() => {
     ${buildClickDispatcher()}
+    // Radix model rows are DIV[role=menuitem]; synthetic events alone often leave the menu open.
+    // Native .click() on the model-switcher-* node reliably closes it (verified via browser CDP).
+    const clickPickerRow = (node) => {
+      if (!(node instanceof HTMLElement)) return;
+      let t = node;
+      const tid = node.getAttribute('data-testid') || '';
+      if (!tid.startsWith('model-switcher-')) {
+        const inner = node.querySelector('[data-testid^="model-switcher-"]');
+        if (inner instanceof HTMLElement) t = inner;
+      }
+      try {
+        dispatchClickSequence(t);
+      } catch {}
+      try {
+        t.click();
+      } catch {}
+    };
     // Capture the selectors and matcher literals up front so the browser expression stays pure.
     const BUTTON_SELECTOR = '${MODEL_BUTTON_SELECTOR}';
     const LABEL_TOKENS = ${labelLiteral};
     const TEST_IDS = ${idLiteral};
     const PRIMARY_LABEL = ${primaryLabelLiteral};
     const MODEL_STRATEGY = ${strategyLiteral};
-    const INITIAL_WAIT_MS = 150;
-    const REOPEN_INTERVAL_MS = 400;
+    const TRUSTED_OPEN_STARTED = ${trustedOpenLiteral};
+    // Current ChatGPT behavior: the picker can auto-dismiss quickly. Scan almost immediately after a
+    // trusted open instead of waiting a full second and missing the real menu.
+    const MENU_SETTLE_MS = 220;
+    const INITIAL_WAIT_MS = 35;
+    const RETRY_WHEN_NO_MATCH_MS = 45;
     const MAX_WAIT_MS = 20000;
     const normalizeText = (value) => {
       if (!value) {
@@ -117,26 +773,7 @@ function buildModelSelectionExpression(
     if (!button) {
       return { status: 'button-missing' };
     }
-
-    const closeMenu = () => {
-      try {
-        if (dispatchClickSequence(button)) {
-          lastPointerClick = performance.now();
-          return;
-        }
-      } catch {}
-      try {
-        document.dispatchEvent(
-          new KeyboardEvent('keydown', {
-            key: 'Escape',
-            code: 'Escape',
-            keyCode: 27,
-            which: 27,
-            bubbles: true,
-          }),
-        );
-      } catch {}
-    };
+    ${buildPickModelPickerMenuJs()}
 
     const getButtonLabel = () => (button.textContent ?? '').trim();
     if (MODEL_STRATEGY === 'current') {
@@ -164,13 +801,6 @@ function buildModelSelectionExpression(
     if (buttonMatchesTarget()) {
       return { status: 'already-selected', label: getButtonLabel() };
     }
-
-    let lastPointerClick = 0;
-    const pointerClick = () => {
-      if (dispatchClickSequence(button)) {
-        lastPointerClick = performance.now();
-      }
-    };
 
     const getOptionLabel = (node) => node?.textContent?.trim() ?? '';
     const optionIsSelected = (node) => {
@@ -308,10 +938,31 @@ function buildModelSelectionExpression(
       return Math.max(score, 0);
     };
 
+    const getModelPickerRoots = () => {
+      const preferred = pickModelPickerMenu();
+      let menus = Array.from(document.querySelectorAll(${menuContainerLiteral}));
+      if (preferred) {
+        menus = [preferred, ...menus.filter((m) => m !== preferred)];
+      }
+      const controlsId = button.getAttribute('aria-controls');
+      if (controlsId) {
+        try {
+          const panel = document.getElementById(controlsId);
+          if (panel instanceof HTMLElement && !menus.includes(panel)) {
+            menus.unshift(panel);
+          }
+        } catch {}
+      }
+      return menus.filter((menu) => {
+        const mr = menu.getBoundingClientRect();
+        if (mr.width < 20 || mr.height < 20) return false;
+        return Boolean(menu.querySelector('[data-testid^="model-switcher-"]'));
+      });
+    };
+
     const findBestOption = () => {
-      // Walk through every menu item and keep whichever earns the highest score.
       let bestMatch = null;
-      const menus = Array.from(document.querySelectorAll(${menuContainerLiteral}));
+      const menus = getModelPickerRoots();
       for (const menu of menus) {
         const buttons = Array.from(menu.querySelectorAll(${menuItemLiteral}));
         for (const option of buttons) {
@@ -333,6 +984,7 @@ function buildModelSelectionExpression(
 
     return new Promise((resolve) => {
       const start = performance.now();
+      let reopenTriggerClicks = 0;
       const detectTemporaryChat = () => {
         try {
           const url = new URL(window.location.href);
@@ -345,69 +997,96 @@ function buildModelSelectionExpression(
         return body.includes('temporary chat');
       };
       const collectAvailableOptions = () => {
-        const menuRoots = Array.from(document.querySelectorAll(${menuContainerLiteral}));
-        const nodes = menuRoots.length > 0
-          ? menuRoots.flatMap((root) => Array.from(root.querySelectorAll(${menuItemLiteral})))
-          : Array.from(document.querySelectorAll(${menuItemLiteral}));
+        const menuRoots = getModelPickerRoots();
+        const nodes = menuRoots.flatMap((root) => Array.from(root.querySelectorAll(${menuItemLiteral})));
         const labels = nodes
           .map((node) => (node?.textContent ?? '').trim())
           .filter(Boolean)
           .filter((label, index, arr) => arr.indexOf(label) === index);
         return labels.slice(0, 12);
       };
-      const ensureMenuOpen = () => {
-        const menuOpen = document.querySelector('[role="menu"], [data-radix-collection-root]');
-        if (!menuOpen && performance.now() - lastPointerClick > REOPEN_INTERVAL_MS) {
-          pointerClick();
-        }
-      };
+      const hasModelPickerMenu = () => getModelPickerRoots().length > 0;
 
-      // Open once and wait a tick before first scan.
-      pointerClick();
-      const openDelay = () => new Promise((r) => setTimeout(r, INITIAL_WAIT_MS));
-      let initialized = false;
-      const attempt = async () => {
-        if (!initialized) {
-          initialized = true;
-          await openDelay();
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      const kickoff = async () => {
+        const waitForModelPickerMenu = async () => {
+          const deadline = performance.now() + MENU_SETTLE_MS;
+          while (performance.now() < deadline) {
+            if (hasModelPickerMenu()) {
+              return true;
+            }
+            await sleep(RETRY_WHEN_NO_MATCH_MS);
+          }
+          return hasModelPickerMenu();
+        };
+        if (!(await waitForModelPickerMenu())) {
+          resolve({
+            status: 'menu-not-open',
+            modelPickerInstrumentation: { reopenTriggerClicks },
+          });
+          return;
         }
-        ensureMenuOpen();
+        await sleep(INITIAL_WAIT_MS);
+
+        const attempt = async () => {
         const match = findBestOption();
         if (match) {
           if (optionIsSelected(match.node)) {
-            closeMenu();
-            resolve({ status: 'already-selected', label: getButtonLabel() || match.label });
+            // Click the active row (e.g. Pro) to dismiss; never click the header here — it reopens
+            // the dropdown right after the menu already closed from the row click.
+            clickPickerRow(match.node);
+            setTimeout(() => {
+              resolve({
+                status: 'already-selected',
+                label: getButtonLabel() || match.label,
+                modelPickerInstrumentation: { reopenTriggerClicks },
+              });
+            }, 150);
             return;
           }
-          dispatchClickSequence(match.node);
+          clickPickerRow(match.node);
           // Submenus (e.g. "Legacy models") need a second pass to pick the actual model option.
           // Keep scanning once the submenu opens instead of treating the submenu click as a final switch.
           const isSubmenu = (match.testid ?? '').toLowerCase().includes('submenu');
           if (isSubmenu) {
-            setTimeout(attempt, REOPEN_INTERVAL_MS / 2);
+            setTimeout(attempt, RETRY_WHEN_NO_MATCH_MS);
             return;
           }
           // Wait for the top bar label to reflect the requested model; otherwise keep scanning.
           setTimeout(() => {
             if (buttonMatchesTarget()) {
-              closeMenu();
-              resolve({ status: 'switched', label: getButtonLabel() || match.label });
+              // Menu already closed by the option click; do not click the header (that reopens it).
+              resolve({
+                status: 'switched',
+                label: getButtonLabel() || match.label,
+                modelPickerInstrumentation: { reopenTriggerClicks },
+              });
               return;
             }
             attempt();
-          }, Math.max(120, INITIAL_WAIT_MS));
+          }, Math.max(100, INITIAL_WAIT_MS));
+          return;
+        }
+        if (TRUSTED_OPEN_STARTED && !hasModelPickerMenu()) {
+          resolve({
+            status: 'menu-not-open',
+            modelPickerInstrumentation: { reopenTriggerClicks },
+          });
           return;
         }
         if (performance.now() - start > MAX_WAIT_MS) {
           resolve({
             status: 'option-not-found',
             hint: { temporaryChat: detectTemporaryChat(), availableOptions: collectAvailableOptions() },
+            modelPickerInstrumentation: { reopenTriggerClicks },
           });
           return;
         }
-        setTimeout(attempt, REOPEN_INTERVAL_MS / 2);
+        setTimeout(attempt, RETRY_WHEN_NO_MATCH_MS);
       };
-      attempt();
+        await attempt();
+      };
+      kickoff();
     });
   })()`;
 }

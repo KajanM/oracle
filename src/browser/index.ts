@@ -28,6 +28,8 @@ import {
   ensurePromptReady,
   installJavaScriptDialogAutoDismissal,
   ensureModelSelection,
+  forceDismissOpenModelPicker,
+  closeOpenModelMenuBestEffort,
   clearPromptComposer,
   waitForAssistantResponse,
   captureAssistantMarkdown,
@@ -169,6 +171,7 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
   }
 
   const effectiveKeepBrowser = Boolean(config.keepBrowser);
+  const chromeStartMs = Date.now();
   const reusedChrome = manualLogin
     ? await maybeReuseRunningChrome(userDataDir, logger, {
         waitForPortMs: config.reuseChromeWaitMs,
@@ -185,6 +188,7 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
       logger,
     ));
   const chromeHost = (chrome as unknown as { host?: string }).host ?? "127.0.0.1";
+  logger(`[browser] [phase] chrome-launch — ${Date.now() - chromeStartMs}ms pid=${chrome.pid} port=${chrome.port} reused=${Boolean(reusedChrome)}`);
   // Persist profile state so future manual-login runs can reuse this Chrome.
   if (manualLogin && chrome.port) {
     await writeDevToolsActivePort(userDataDir, chrome.port);
@@ -205,8 +209,8 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
         preserveUserDataDir: manualLogin,
       },
     );
-  } catch {
-    // ignore failure; cleanup still happens below
+  } catch (err) {
+    logger(`[browser] [warn] registerTerminationHooks failed: ${err instanceof Error ? err.message : err}`);
   }
 
   let client: ChromeClient | null = null;
@@ -223,6 +227,7 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
   let preserveBrowserOnError = false;
 
   try {
+    const cdpStartMs = Date.now();
     try {
       const strictTabIsolation = Boolean(manualLogin && reusedChrome);
       const connection = await connectWithNewTab(chrome.port, logger, undefined, chromeHost, {
@@ -239,6 +244,7 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
       }
       throw error;
     }
+    logger(`[browser] [phase] cdp-connect — ${Date.now() - cdpStartMs}ms targetId=${isolatedTargetId ?? "default"}`);
     logger(`[browser] [build] oracle build=${getBuildTag()} pid=${process.pid} chrome_pid=${chrome.pid} port=${chrome.port}`);
     const disconnectPromise = new Promise<never>((_, reject) => {
       client?.on("disconnect", () => {
@@ -255,6 +261,15 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
     const raceWithDisconnect = <T>(promise: Promise<T>): Promise<T> =>
       Promise.race([promise, disconnectPromise]);
     const { Network, Page, Runtime, Input, DOM } = client;
+    const bringPageToFront = async () => {
+      if (Page && typeof Page.bringToFront === "function") {
+        try {
+          await Page.bringToFront();
+        } catch (err) {
+          logger(`[browser] [warn] bringToFront failed: ${err instanceof Error ? err.message : err}`);
+        }
+      }
+    };
 
     if (!config.headless && config.hideWindow) {
       await hideChromeWindow(chrome, logger);
@@ -270,6 +285,7 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
       await Network.clearBrowserCookies();
     }
 
+    const cookieStartMs = Date.now();
     const manualLoginCookieSync = manualLogin && Boolean(config.manualLoginCookieSync);
     const cookieSyncEnabled = config.cookieSync && (!manualLogin || manualLoginCookieSync);
     if (cookieSyncEnabled) {
@@ -332,11 +348,15 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
       );
     }
 
+    logger(`[browser] [phase] cookie-sync — ${Date.now() - cookieStartMs}ms count=${appliedCookies}`);
+    const navStartMs = Date.now();
     const baseUrl = CHATGPT_URL;
     // First load the base ChatGPT homepage to satisfy potential interstitials,
     // then hop to the requested URL if it differs.
     await raceWithDisconnect(navigateToChatGPT(Page, Runtime, baseUrl, logger));
     await raceWithDisconnect(ensureNotBlocked(Runtime, config.headless, logger));
+    logger(`[browser] [phase] navigate — ${Date.now() - navStartMs}ms url=${baseUrl}`);
+    const loginStartMs = Date.now();
     // Learned: login checks must happen on the base domain before jumping into project URLs.
     await raceWithDisconnect(
       waitForLogin({
@@ -347,6 +367,7 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
         timeoutMs: config.timeoutMs,
       }),
     );
+    logger(`[browser] [phase] login — ${Date.now() - loginStartMs}ms`);
 
     if (config.url !== baseUrl) {
       await raceWithDisconnect(
@@ -359,6 +380,7 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
         }),
       );
     } else {
+      await bringPageToFront();
       await raceWithDisconnect(ensurePromptReady(Runtime, config.inputTimeoutMs, logger));
     }
     logger(
@@ -371,8 +393,8 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
           lastTargetId = info?.targetInfo?.targetId ?? lastTargetId;
           lastUrl = info?.targetInfo?.url ?? lastUrl;
         }
-      } catch {
-        // ignore
+      } catch (err) {
+        logger(`[browser] [warn] getTargetInfo failed: ${err instanceof Error ? err.message : err}`);
       }
       try {
         const { result } = await Runtime.evaluate({
@@ -382,8 +404,8 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
         if (typeof result?.value === "string") {
           lastUrl = result.value;
         }
-      } catch {
-        // ignore
+      } catch (err) {
+        logger(`[browser] [warn] location.href eval failed: ${err instanceof Error ? err.message : err}`);
       }
       if (lastUrl) {
         logger(`[browser] url = ${lastUrl}`);
@@ -418,8 +440,8 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
             await emitRuntimeHint();
             return true;
           }
-        } catch {
-          // ignore; keep polling until timeout
+        } catch (err) {
+          logger(`[browser] [warn] conversation hint poll failed: ${err instanceof Error ? err.message : err}`);
         }
         await delay(250);
       }
@@ -438,11 +460,13 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
         });
     };
     await captureRuntimeSnapshot();
+    const modelStartMs = Date.now();
     const modelStrategy = config.modelStrategy ?? DEFAULT_MODEL_STRATEGY;
     if (config.desiredModel && modelStrategy !== "ignore") {
+      await bringPageToFront();
       await raceWithDisconnect(
         withRetries(
-          () => ensureModelSelection(Runtime, config.desiredModel as string, logger, modelStrategy),
+          () => ensureModelSelection(Runtime, config.desiredModel as string, logger, modelStrategy, Input),
           {
             retries: 2,
             delayMs: 300,
@@ -463,16 +487,20 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
             : "";
         throw new Error(`${base}${hint}`);
       });
+      await raceWithDisconnect(closeOpenModelMenuBestEffort(Runtime, Input, logger));
+      await raceWithDisconnect(forceDismissOpenModelPicker(Runtime, logger));
       await raceWithDisconnect(ensurePromptReady(Runtime, config.inputTimeoutMs, logger));
       logger(
         `Prompt textarea ready (after model switch, ${promptText.length.toLocaleString()} chars queued)`,
       );
     } else if (modelStrategy === "ignore") {
-      logger("Model picker: skipped (strategy=ignore)");
+      logger("[browser] [phase] model-select — skipped (strategy=ignore)");
     }
+    logger(`[browser] [phase] model-select — ${Date.now() - modelStartMs}ms model=${config.desiredModel ?? "default"} strategy=${modelStrategy}`);
     // Handle thinking time selection if specified
     const thinkingTime = config.thinkingTime;
     if (thinkingTime) {
+      const thinkStartMs = Date.now();
       await raceWithDisconnect(
         withRetries(() => ensureThinkingTime(Runtime, thinkingTime, logger), {
           retries: 2,
@@ -486,6 +514,7 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
           },
         }),
       );
+      logger(`[browser] [phase] thinking-time — ${Date.now() - thinkStartMs}ms level=${thinkingTime}`);
     }
     const profileLockTimeoutMs = manualLogin ? (config.profileLockTimeoutMs ?? 0) : 0;
     let profileLock: ProfileRunLock | null = null;
@@ -503,6 +532,8 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
       await handle.release().catch(() => undefined);
     };
     const submitOnce = async (prompt: string, submissionAttachments: BrowserAttachment[]) => {
+      const submitStartMs = Date.now();
+      logger(`[browser] [phase] submit-flow — started chars=${prompt.length} attachments=${submissionAttachments.length}`);
       const baselineSnapshot = await readAssistantSnapshot(Runtime).catch(() => null);
       const baselineAssistantText =
         typeof baselineSnapshot?.text === "string" ? baselineSnapshot.text.trim() : "";
@@ -597,6 +628,7 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
       }
       // Reattach needs a /c/ URL; ChatGPT can update it late, so poll in the background.
       scheduleConversationHint("post-submit", config.timeoutMs ?? 120_000);
+      logger(`[browser] [phase] submit-flow — ${Date.now() - submitStartMs}ms baseline_turns=${baselineTurns ?? "none"}`);
       return { baselineTurns, baselineAssistantText };
     };
 
@@ -1005,12 +1037,13 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
       normalizedError,
     );
   } finally {
+    const cleanupStartMs = Date.now();
     try {
       if (!connectionClosedUnexpectedly) {
         await client?.close();
       }
-    } catch {
-      // ignore
+    } catch (err) {
+      logger(`[browser] [warn] client.close() failed: ${err instanceof Error ? err.message : err}`);
     }
     // Close the isolated tab once the response has been fully captured to prevent
     // tab accumulation across repeated runs. Keep the tab open on incomplete runs
@@ -1021,12 +1054,12 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
     removeDialogHandler?.();
     removeTerminationHooks?.();
     const keepBrowserOpen = effectiveKeepBrowser || preserveBrowserOnError;
-    if (!keepBrowserOpen) {
+      if (!keepBrowserOpen) {
       if (!connectionClosedUnexpectedly) {
         try {
           await chrome.kill();
-        } catch {
-          // ignore kill failures
+        } catch (err) {
+          logger(`[browser] [warn] chrome.kill() failed: ${err instanceof Error ? err.message : err}`);
         }
       }
       if (manualLogin) {
@@ -1049,7 +1082,8 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
       }
       if (!connectionClosedUnexpectedly) {
         const totalSeconds = (Date.now() - startedAt) / 1000;
-        logger(`Cleanup ${runStatus} • ${totalSeconds.toFixed(1)}s total`);
+        logger(`[browser] [phase] cleanup — ${Date.now() - cleanupStartMs}ms`);
+        logger(`[browser] [phase] total — ${Math.round(totalSeconds * 1000)}ms status=${runStatus}`);
       }
     } else if (!connectionClosedUnexpectedly) {
       logger(`Chrome left running on port ${chrome.port} with profile ${userDataDir}`);
@@ -1316,6 +1350,15 @@ async function runRemoteBrowserMode(
     };
     client.on("disconnect", markConnectionLost);
     const { Network, Page, Runtime, Input, DOM } = client;
+    const bringPageToFront = async () => {
+      if (Page && typeof Page.bringToFront === "function") {
+        try {
+          await Page.bringToFront();
+        } catch (err) {
+          logger(`[browser] [warn] remote bringToFront failed: ${err instanceof Error ? err.message : err}`);
+        }
+      }
+    };
 
     const domainEnablers = [Network.enable({}), Page.enable(), Runtime.enable()];
     if (DOM && typeof DOM.enable === "function") {
@@ -1330,6 +1373,7 @@ async function runRemoteBrowserMode(
     await navigateToChatGPT(Page, Runtime, config.url, logger);
     await ensureNotBlocked(Runtime, config.headless, logger);
     await ensureLoggedIn(Runtime, logger, { remoteSession: true });
+    await bringPageToFront();
     await ensurePromptReady(Runtime, config.inputTimeoutMs, logger);
     logger(
       `Prompt textarea ready (initial focus, ${promptText.length.toLocaleString()} chars queued)`,
@@ -1343,14 +1387,15 @@ async function runRemoteBrowserMode(
         lastUrl = result.value;
       }
       await emitRuntimeHint();
-    } catch {
-      // ignore
+    } catch (err) {
+      logger(`[browser] [warn] remote snapshot failed: ${err instanceof Error ? err.message : err}`);
     }
 
     const modelStrategy = config.modelStrategy ?? DEFAULT_MODEL_STRATEGY;
     if (config.desiredModel && modelStrategy !== "ignore") {
+      await bringPageToFront();
       await withRetries(
-        () => ensureModelSelection(Runtime, config.desiredModel as string, logger, modelStrategy),
+        () => ensureModelSelection(Runtime, config.desiredModel as string, logger, modelStrategy, Input),
         {
           retries: 2,
           delayMs: 300,
@@ -1363,6 +1408,8 @@ async function runRemoteBrowserMode(
           },
         },
       );
+      await closeOpenModelMenuBestEffort(Runtime, Input, logger);
+      await forceDismissOpenModelPicker(Runtime, logger);
       await ensurePromptReady(Runtime, config.inputTimeoutMs, logger);
       logger(
         `Prompt textarea ready (after model switch, ${promptText.length.toLocaleString()} chars queued)`,
@@ -1572,8 +1619,8 @@ async function runRemoteBrowserMode(
             if (conversationUrl) {
               lastUrl = conversationUrl;
             }
-          } catch {
-            // ignore
+          } catch (err) {
+            logger(`[browser] [warn] readConversationUrl failed: ${err instanceof Error ? err.message : err}`);
           }
           await emitRuntimeHint();
           const runtime = {
@@ -1759,8 +1806,8 @@ async function runRemoteBrowserMode(
       if (!connectionClosedUnexpectedly && client) {
         await client.close();
       }
-    } catch {
-      // ignore
+    } catch (err) {
+      logger(`[browser] [warn] remote client.close() failed: ${err instanceof Error ? err.message : err}`);
     }
     removeDialogHandler?.();
     await closeRemoteChromeTarget(host, port, remoteTargetId ?? undefined, logger);
@@ -1867,11 +1914,12 @@ function isAssistantResponseTimeoutError(error: unknown): boolean {
   );
 }
 
-async function readConversationUrl(Runtime: ChromeClient["Runtime"]): Promise<string | null> {
+async function readConversationUrl(Runtime: ChromeClient["Runtime"], logger?: BrowserLogger): Promise<string | null> {
   try {
     const currentUrl = await Runtime.evaluate({ expression: "location.href", returnByValue: true });
     return typeof currentUrl.result?.value === "string" ? currentUrl.result.value : null;
-  } catch {
+  } catch (err) {
+    logger?.(`[browser] [warn] readConversationUrl eval failed: ${err instanceof Error ? err.message : err}`);
     return null;
   }
 }
@@ -2070,8 +2118,8 @@ function startThinkingStatusMonitor(
         }
         logger(formatThinkingLog(startedAt, Date.now(), nextMessage, locatorSuffix));
       }
-    } catch {
-      // ignore DOM polling errors
+    } catch (err) {
+      logger(`[browser] [warn] thinking monitor poll failed: ${err instanceof Error ? err.message : err}`);
     } finally {
       pending = false;
     }

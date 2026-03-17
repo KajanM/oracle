@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Added
+
+- Browser: `ORACLE_BROWSER_MODEL_DEBUG=1` or `--verbose` logs model-picker DOM probes (`dom-probe` / `dom-compact`) and warns when the model trigger is re-clicked during selection (flicker diagnosis).
+
+### Fixed
+
+- Browser: stop ChatGPT model picker from flickering open/closed when the site no longer exposes the old menu DOM (`role="menu"` / Radix root) by treating `aria-expanded` / `data-state` and newer Radix surfaces as “open”, and by scanning the `aria-controls` panel for options.
+- Browser: shorten model-picker poll delays — ChatGPT often auto-closes the menu after ~250–350ms; the previous 400ms minimum between re-opens left the menu closed so the next click only toggled, causing visible flicker.
+- Browser: after model selection, force-dismiss the model dropdown (Escape + trigger) so it cannot stay open over the composer; same dismiss on picker errors; extra dismiss before focusing the prompt.
+- Browser: stop calling the header model button after choosing a picker row — that was reopening the menu right after Pro (etc.) closed it; when the target row is already selected, click that row to dismiss instead of toggling the header.
+- Browser: wait ~1s after opening the model menu before matching options (first paint is often wrong); reopen once if the menu closed during the wait.
+- Browser: after picking a model row, call native `HTMLElement.click()` on the `model-switcher-*` node (not only synthetic pointer events) so the Radix menu actually closes.
+- Browser: after model select, `closeOpenModelMenuBestEffort` re-clicks the Pro row by label/testid, then uses **CDP** outside-clicks (beside the menu + composer) and Escape until the dropdown closes.
+- Browser: **root cause fix** — never use the first `[role="menu"]` in the document (often not the model picker). Resolve the menu that contains `model-switcher-*` and sits under the trigger; use that for Pro clicks, Escape, and CDP outside-clicks. Logs: `[browser] [model] diagnostic` with `pickedHasSwitcher` / `menus[]`.
+
 ## 0.9.0 — 2026-03-08
 
 ### Changed

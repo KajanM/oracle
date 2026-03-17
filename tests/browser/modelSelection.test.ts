@@ -64,10 +64,25 @@ describe("browser model selection matchers", () => {
     expect(testIdTokens).toContain("gpt-5.2-instant");
   });
 
-  it("closes the menu after a successful selection path", () => {
+  it("waits for menu content to settle before first scan", () => {
+    const expression = buildModelSelectionExpressionForTest("gpt-5.4-pro");
+    expect(expression).toContain("MENU_SETTLE_MS = 220");
+    expect(expression).toContain("kickoff");
+    expect(expression).toContain("pickModelPickerMenu");
+  });
+
+  it("only scans model-switcher menus instead of falling back to page buttons", () => {
+    const expression = buildModelSelectionExpressionForTest("gpt-5.4-pro");
+    expect(expression).toContain("getModelPickerRoots");
+    expect(expression).toContain("model-switcher-");
+    expect(expression).not.toContain(": Array.from(document.querySelectorAll");
+  });
+
+  it("uses native click on picker row to dismiss Radix menu", () => {
     const expression = buildModelSelectionExpressionForTest("gpt-5.4");
-    expect(expression).toContain("const closeMenu = () =>");
-    expect(expression).toContain("key: 'Escape'");
-    expect(expression).toContain("closeMenu();");
+    expect(expression).toContain("clickPickerRow");
+    expect(expression).toContain("t.click()");
+    expect(expression).toContain("reopens it");
+    expect(expression).not.toContain("closeMenu()");
   });
 });
