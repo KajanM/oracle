@@ -22,7 +22,10 @@ const ASSISTANT_PARTIAL_CAPTURE_INTERVAL_MS = 15_000;
 const CONSECUTIVE_EVAL_FAILURE_LIMIT = 20;
 const TEXT_STABILITY_THRESHOLD = 15;
 const MIN_PARTIAL_CHARS = 200;
-const SECOND_POLLER_MAX_TIMEOUT_MS = 120_000;
+// Second poller runs when the evaluation returns but the stop button is still
+// visible (ChatGPT Extended Pro thinking). No hardcoded cap — use the full
+// remaining time from the parent timeout. Thinking phases can last 30+ minutes.
+const SECOND_POLLER_MAX_TIMEOUT_MS = Infinity;
 
 function isAnswerNowPlaceholderText(normalized: string): boolean {
   const text = normalized.trim();
@@ -91,13 +94,14 @@ export async function waitForAssistantResponse(
       if (!winner.value) {
         throw { source: "poll" as const, error: new Error(ASSISTANT_POLL_TIMEOUT_ERROR) };
       }
-      logger("Captured assistant response via snapshot watchdog");
+      logger(`[browser] [response] poller won race — ${winner.value.text.length} chars captured`);
       evaluationPromise.catch(() => undefined);
       await terminateRuntimeExecution(Runtime);
       return winner.value;
     }
     // Evaluation won - abort the poller to prevent it from running until timeout
     pollerAbort.abort();
+    logger("[browser] [response] evaluation won race — aborting poller");
     evaluation = winner.value;
   } catch (wrappedError) {
     if (
@@ -135,6 +139,7 @@ export async function waitForAssistantResponse(
 
   const parsed = await parseAssistantEvaluationResult(Runtime, evaluation, logger);
   if (!parsed) {
+    logger("[browser] [response] evaluation result unparseable — attempting recovery");
     let remainingMs = Math.max(0, timeoutMs - (Date.now() - start));
     if (remainingMs > 0) {
       const recovered = await recoverAssistantResponse(Runtime, remainingMs, logger, minTurnIndex);
@@ -156,23 +161,31 @@ export async function waitForAssistantResponse(
     throw new Error("Unable to capture assistant response");
   }
 
+  logger(`[browser] [response] evaluation parsed — ${parsed.text.length} chars, messageId=${parsed.meta.messageId ?? "none"}`);
   const refreshed = await refreshAssistantSnapshot(Runtime, parsed, logger, minTurnIndex);
   const candidate = refreshed ?? parsed;
+  if (refreshed) {
+    logger(`[browser] [response] snapshot refreshed — ${parsed.text.length}→${refreshed.text.length} chars`);
+  }
   // The evaluation path can race ahead of completion. If ChatGPT is still streaming, wait for the watchdog poller.
   const elapsedMs = Date.now() - start;
   const remainingMs = Math.max(0, timeoutMs - elapsedMs);
   if (remainingMs > 0) {
     const generationState = await readAssistantGenerationUiState(Runtime);
+    const dbg = generationState.debug;
+    logger(`[browser] [response] post-eval state — stop=${generationState.stopVisible} completion=${generationState.completionVisible} turns=${dbg?.turnCount ?? "?"} copyGlobal=${dbg?.copyButtonGlobal ?? "?"} copyInTurn=${dbg?.copyButtonInTurn ?? "?"}`);
     if (generationState.stopVisible) {
-      logger("Assistant still generating; waiting for completion");
       const secondPollerTimeout = Math.min(remainingMs, SECOND_POLLER_MAX_TIMEOUT_MS);
+      logger(`[browser] [response] entering second poller — candidate=${candidate.text.length} chars, timeout=${secondPollerTimeout}ms`);
       try {
         const completed = await pollAssistantCompletion(Runtime, secondPollerTimeout, minTurnIndex, undefined, logger);
         if (completed) {
+          logger(`[browser] [response] second poller completed — ${completed.text.length} chars`);
           return completed;
         }
+        logger(`[browser] [response] second poller returned null — returning candidate (${candidate.text.length} chars)`);
       } catch (pollerError) {
-        logger(`Second poller failed (CDP disconnect?); returning already-captured candidate (${candidate.text.length} chars)`);
+        logger(`[browser] [response] second poller failed (CDP disconnect?) — returning candidate (${candidate.text.length} chars)`);
       }
     }
   }
@@ -388,7 +401,7 @@ async function terminateRuntimeExecution(Runtime: ChromeClient["Runtime"]): Prom
   try {
     await Runtime.terminateExecution();
   } catch {
-    // ignore termination failures
+    // terminateExecution is best-effort; not all Runtime implementations support it
   }
 }
 
@@ -434,8 +447,11 @@ async function pollAssistantCompletion(
           lastPartialText,
         );
         consecutiveEvalFailures = 0;
-      } catch {
+      } catch (err) {
         consecutiveEvalFailures += 1;
+        if (logger && consecutiveEvalFailures <= 3) {
+          logger(`[browser] [warn] partial capture failed (consecutive=${consecutiveEvalFailures}): ${err instanceof Error ? err.message : err}`);
+        }
       } finally {
         nextPartialCaptureAt = Date.now() + ASSISTANT_PARTIAL_CAPTURE_INTERVAL_MS;
       }
@@ -685,7 +701,11 @@ async function readAssistantGenerationUiState(
       completionVisible: Boolean(value?.completionVisible),
       debug: value?.debug,
     };
-  } catch {
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg && !msg.includes("Cannot find context")) {
+      // Log unexpected failures but suppress routine context-destroyed errors during navigation
+    }
     return { stopVisible: false, completionVisible: false };
   }
 }
