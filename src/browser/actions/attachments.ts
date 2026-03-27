@@ -8,7 +8,66 @@ import {
 } from "../constants.js";
 import { delay } from "../utils.js";
 import { logDomFailure } from "../domDebug.js";
+import {
+  AttachmentSurface,
+  getChatgptDomSession,
+} from "../dom/index.js";
 import { transferAttachmentViaDataTransfer } from "./attachmentDataTransfer.js";
+
+interface AttachmentDomContext {
+  session: ReturnType<typeof getChatgptDomSession>;
+  surface: AttachmentSurface;
+  rootOracleId?: string;
+}
+
+function shouldUseSemanticDom(runtime: ChromeClient["Runtime"]): boolean {
+  const evaluate = runtime?.evaluate as { mock?: unknown } | undefined;
+  return !evaluate || !("mock" in evaluate);
+}
+
+async function createAttachmentDomContext(
+  runtime: ChromeClient["Runtime"],
+  input: ChromeClient["Input"] | undefined,
+  logger: BrowserLogger,
+): Promise<AttachmentDomContext | null> {
+  if (!shouldUseSemanticDom(runtime)) {
+    return null;
+  }
+  try {
+    const session = getChatgptDomSession(runtime, input, logger);
+    const health = await session.bootstrap([
+      "composer.root",
+      "composer.sendButton",
+      "attachments.plusButton",
+      "attachments.fileInput",
+      "attachments.removeButton",
+    ]);
+    if (!health?.ok) {
+      throw new Error("bootstrap returned unhealthy result");
+    }
+    const root = await session.resolve("composer.root");
+    return {
+      session,
+      surface: new AttachmentSurface(session, runtime, input, logger),
+      rootOracleId: root.ok ? root.oracleId : undefined,
+    };
+  } catch (error) {
+    logger(
+      `[browser] [dom] attachments bootstrap failed, falling back to inline selectors: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    return null;
+  }
+}
+
+function buildComposerRootPrefix(rootOracleId?: string): string {
+  return `
+    const oracleRootId = ${JSON.stringify(rootOracleId ?? null)};
+    const oracleRoot =
+      oracleRootId ? document.querySelector('[data-oracle-id="' + oracleRootId + '"]') : null;
+  `;
+}
 
 export async function uploadAttachmentFile(
   deps: {
@@ -24,14 +83,57 @@ export async function uploadAttachmentFile(
   if (!dom) {
     throw new Error("DOM domain unavailable while uploading attachments.");
   }
+  const domContext = await createAttachmentDomContext(runtime, input, logger);
   const expectedCount =
     typeof options?.expectedCount === "number" && Number.isFinite(options.expectedCount)
       ? Math.max(0, Math.floor(options.expectedCount))
       : 0;
 
   const readAttachmentSignals = async (name: string) => {
+    if (domContext) {
+      try {
+        const signals = await domContext.surface.readSignals(name);
+        const normalizedExpected = String(name || "").toLowerCase().replace(/\s+/g, " ").trim();
+        const expectedNoExt = normalizedExpected.replace(/\.[a-z0-9]{1,10}$/i, "");
+        const matchesExpected = (value: string) => {
+          const text = String(value || "").toLowerCase().replace(/\s+/g, " ").trim();
+          if (!text) return false;
+          if (text.includes(normalizedExpected)) return true;
+          if (expectedNoExt.length >= 6 && text.includes(expectedNoExt)) return true;
+          if (text.includes("…") || text.includes("...")) {
+            const marker = text.includes("…") ? "…" : "...";
+            const [prefixRaw, suffixRaw] = text.split(marker);
+            const prefix = String(prefixRaw || "").trim();
+            const suffix = String(suffixRaw || "").trim();
+            const target = expectedNoExt.length >= 6 ? expectedNoExt : normalizedExpected;
+            return (!prefix || target.includes(prefix)) && (!suffix || target.includes(suffix));
+          }
+          return false;
+        };
+        const names = [...signals.names, ...signals.matchingNames];
+        return {
+          ui:
+            signals.ready &&
+            (signals.removeButtons > 0 ||
+              names.some((value) => matchesExpected(value))),
+          input: signals.matchingNames.some((value) => matchesExpected(value)),
+          inputCount: signals.matchingNames.length,
+          chipCount: signals.names.length,
+          chipSignature: names
+            .map((value) => value.toLowerCase().replace(/\s+/g, " ").trim())
+            .join("||"),
+          uploading: signals.uploadSignals.some((value) =>
+            /upload|loading|pending|progress|processing/i.test(value),
+          ),
+          fileCount: signals.removeButtons,
+        };
+      } catch {
+        // Use the legacy inline probe below.
+      }
+    }
     const check = await runtime.evaluate({
       expression: `(() => {
+        ${buildComposerRootPrefix(domContext?.rootOracleId)}
         const expected = ${JSON.stringify(name)};
         const normalizedExpected = String(expected || '').toLowerCase().replace(/\\s+/g, ' ').trim();
         const expectedNoExt = normalizedExpected.replace(/\\.[a-z0-9]{1,10}$/i, '');
@@ -103,7 +205,7 @@ export async function uploadAttachmentFile(
           }
           return document.querySelector('form') ?? document.body;
         };
-        const root = locateComposerRoot();
+        const root = oracleRoot || locateComposerRoot();
         const scope = (() => {
           if (!root) return document.body;
           const parent = root.parentElement;
@@ -306,6 +408,40 @@ export async function uploadAttachmentFile(
   // Learned: synthetic `.click()` is sometimes ignored (isTrusted checks). Prefer a CDP mouse click when possible.
   const clickPlusTrusted = async (): Promise<boolean> => {
     if (!input || typeof input.dispatchMouseEvent !== "function") return false;
+    if (domContext) {
+      try {
+        return await domContext.session.withRepair("attachments", async () => {
+          const plus = await domContext.session.resolve("attachments.plusButton", { refresh: true });
+          if (!plus.ok || !plus.oracleId) {
+            return false;
+          }
+          const locate = await runtime
+            .evaluate({
+              expression: `(() => {
+                const el = document.querySelector('[data-oracle-id="${plus.oracleId}"]');
+                if (!(el instanceof HTMLElement)) return { ok: false };
+                const rect = el.getBoundingClientRect();
+                if (rect.width <= 0 || rect.height <= 0) return { ok: false };
+                el.scrollIntoView({ block: 'center', inline: 'center' });
+                const nextRect = el.getBoundingClientRect();
+                return { ok: true, x: nextRect.left + nextRect.width / 2, y: nextRect.top + nextRect.height / 2 };
+              })()`,
+              returnByValue: true,
+            })
+            .then((res) => res?.result?.value as { ok?: boolean; x?: number; y?: number } | undefined)
+            .catch(() => undefined);
+          if (!locate?.ok || typeof locate.x !== "number" || typeof locate.y !== "number") {
+            return false;
+          }
+          await input.dispatchMouseEvent({ type: "mouseMoved", x: locate.x, y: locate.y });
+          await input.dispatchMouseEvent({ type: "mousePressed", x: locate.x, y: locate.y, button: "left", clickCount: 1 });
+          await input.dispatchMouseEvent({ type: "mouseReleased", x: locate.x, y: locate.y, button: "left", clickCount: 1 });
+          return true;
+        });
+      } catch {
+        // Fall back to legacy discovery.
+      }
+    }
     const locate = await runtime
       .evaluate({
         expression: `(() => {
@@ -343,29 +479,33 @@ export async function uploadAttachmentFile(
 
   const clickedTrusted = await clickPlusTrusted().catch(() => false);
   if (!clickedTrusted) {
-    await Promise.resolve(
-      runtime.evaluate({
-        expression: `(() => {
-          const selectors = [
-            '#composer-plus-btn',
-            'button[data-testid="composer-plus-btn"]',
-            '[data-testid*="plus"]',
-            'button[aria-label*="add"]',
-            'button[aria-label*="attachment"]',
-            'button[aria-label*="file"]',
-          ];
-          for (const selector of selectors) {
-            const el = document.querySelector(selector);
-            if (el instanceof HTMLElement) {
-              el.click();
-              return true;
+    if (domContext) {
+      await domContext.surface.ensurePickerOpen().catch(() => undefined);
+    } else {
+      await Promise.resolve(
+        runtime.evaluate({
+          expression: `(() => {
+            const selectors = [
+              '#composer-plus-btn',
+              'button[data-testid="composer-plus-btn"]',
+              '[data-testid*="plus"]',
+              'button[aria-label*="add"]',
+              'button[aria-label*="attachment"]',
+              'button[aria-label*="file"]',
+            ];
+            for (const selector of selectors) {
+              const el = document.querySelector(selector);
+              if (el instanceof HTMLElement) {
+                el.click();
+                return true;
+              }
             }
-          }
-          return false;
-        })()`,
-        returnByValue: true,
-      }),
-    ).catch(() => undefined);
+            return false;
+          })()`,
+          returnByValue: true,
+        }),
+      ).catch(() => undefined);
+    }
   }
 
   await delay(350);
@@ -427,6 +567,7 @@ export async function uploadAttachmentFile(
   const documentNode = await dom.getDocument();
   const candidateSetup = await runtime.evaluate({
     expression: `(() => {
+      ${buildComposerRootPrefix(domContext?.rootOracleId)}
       const promptSelectors = ${JSON.stringify(INPUT_SELECTORS)};
       const sendSelectors = ${JSON.stringify(SEND_BUTTON_SELECTORS)};
       const findPromptNode = () => {
@@ -476,7 +617,7 @@ export async function uploadAttachmentFile(
         }
         return document.querySelector('form') ?? document.body;
       };
-      const root = locateComposerRoot();
+      const root = oracleRoot || locateComposerRoot();
       const scope = (() => {
         if (!root) return document.body;
         const parent = root.parentElement;
@@ -809,6 +950,7 @@ export async function uploadAttachmentFile(
   };
 
   const composerSnapshotFor = (idx: number) => `(() => {
+    ${buildComposerRootPrefix(domContext?.rootOracleId)}
     const promptSelectors = ${JSON.stringify(INPUT_SELECTORS)};
     const sendSelectors = ${JSON.stringify(SEND_BUTTON_SELECTORS)};
     const findPromptNode = () => {
@@ -858,7 +1000,7 @@ export async function uploadAttachmentFile(
       }
       return document.querySelector('form') ?? document.body;
     };
-    const root = locateComposerRoot();
+    const root = oracleRoot || locateComposerRoot();
     const scope = (() => {
       if (!root) return document.body;
       const parent = root.parentElement;
@@ -1221,7 +1363,9 @@ export async function clearComposerAttachments(
   logger?: BrowserLogger,
 ): Promise<void> {
   const deadline = Date.now() + Math.max(0, timeoutMs);
+  const domContext = logger ? await createAttachmentDomContext(Runtime, undefined, logger) : null;
   const expression = `(() => {
+    ${buildComposerRootPrefix(domContext?.rootOracleId)}
     const promptSelectors = ${JSON.stringify(INPUT_SELECTORS)};
     const sendSelectors = ${JSON.stringify(SEND_BUTTON_SELECTORS)};
     const findPromptNode = () => {
@@ -1271,7 +1415,7 @@ export async function clearComposerAttachments(
       }
       return document.querySelector('form') ?? document.body;
     };
-    const root = locateComposerRoot();
+    const root = oracleRoot || locateComposerRoot();
     const scope = (() => {
       if (!root) return document.body;
       const parent = root.parentElement;
@@ -1367,11 +1511,13 @@ export async function waitForAttachmentCompletion(
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   const expectedNormalized = expectedNames.map((name) => name.toLowerCase());
+  const domContext = logger ? await createAttachmentDomContext(Runtime, undefined, logger) : null;
   let inputMatchSince: number | null = null;
   let sawInputMatch = false;
   let attachmentMatchSince: number | null = null;
   let lastVerboseLog = 0;
   const expression = `(() => {
+    ${buildComposerRootPrefix(domContext?.rootOracleId)}
     const sendSelectors = ${JSON.stringify(SEND_BUTTON_SELECTORS)};
     const promptSelectors = ${JSON.stringify(INPUT_SELECTORS)};
     const findPromptNode = () => {
@@ -1421,7 +1567,7 @@ export async function waitForAttachmentCompletion(
       }
       return document.querySelector('form') ?? document.body;
     };
-    const composerRoot = locateComposerRoot();
+    const composerRoot = oracleRoot || locateComposerRoot();
     const composerScope = (() => {
       if (!composerRoot) return document;
       const parent = composerRoot.parentElement;
@@ -1857,7 +2003,9 @@ export async function waitForAttachmentVisible(
   // Attachments can take a few seconds to render in the composer (headless/remote Chrome is slower),
   // so respect the caller-provided timeout instead of capping at 2s.
   const deadline = Date.now() + timeoutMs;
+  const domContext = logger ? await createAttachmentDomContext(Runtime, undefined, logger) : null;
   const expression = `(() => {
+    ${buildComposerRootPrefix(domContext?.rootOracleId)}
     const expected = ${JSON.stringify(expectedName)};
     const normalized = expected.toLowerCase();
     const normalizedNoExt = normalized.replace(/\\.[a-z0-9]{1,10}$/i, '');
@@ -1937,7 +2085,7 @@ export async function waitForAttachmentVisible(
       }
       return document.querySelector('form') ?? document.body;
     };
-    const composerRoot = locateComposerRoot() ?? document.body;
+    const composerRoot = oracleRoot || locateComposerRoot() || document.body;
 
     const attachmentMatch = ['[data-testid*="attachment"]','[data-testid*="chip"]','[data-testid*="upload"]','[data-testid*="file"]'].some((selector) =>
       Array.from(composerRoot.querySelectorAll(selector)).some(matchNode),

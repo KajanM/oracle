@@ -13,6 +13,7 @@ import {
   logConversationSnapshot,
   buildConversationDebugExpression,
 } from "../domDebug.js";
+import { AssistantSurface, getChatgptDomSession } from "../dom/index.js";
 import { buildClickDispatcher } from "./domEvents.js";
 
 const ASSISTANT_POLL_TIMEOUT_ERROR = "assistant-response-watchdog-timeout";
@@ -26,6 +27,35 @@ const MIN_PARTIAL_CHARS = 200;
 // visible (ChatGPT Extended Pro thinking). No hardcoded cap — use the full
 // remaining time from the parent timeout. Thinking phases can last 30+ minutes.
 const SECOND_POLLER_MAX_TIMEOUT_MS = Infinity;
+
+interface AssistantDomContext {
+  session: ReturnType<typeof getChatgptDomSession>;
+  surface: AssistantSurface;
+}
+
+async function createAssistantDomContext(
+  Runtime: ChromeClient["Runtime"],
+  logger: BrowserLogger,
+): Promise<AssistantDomContext | null> {
+  try {
+    const session = getChatgptDomSession(Runtime, undefined, logger);
+    const health = await session.bootstrap(["assistant.latestTurn", "assistant.copyButton"]);
+    if (!health?.ok) {
+      throw new Error("bootstrap returned unhealthy result");
+    }
+    return {
+      session,
+      surface: new AssistantSurface(session, Runtime, undefined, logger),
+    };
+  } catch (error) {
+    logger(
+      `[browser] [dom] assistant bootstrap failed, falling back to inline selectors: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    return null;
+  }
+}
 
 function isAnswerNowPlaceholderText(normalized: string): boolean {
   const text = normalized.trim();
@@ -56,6 +86,7 @@ export async function waitForAssistantResponse(
 }> {
   const start = Date.now();
   logger("Waiting for ChatGPT response");
+  const domContext = await createAssistantDomContext(Runtime, logger);
   // Learned: two paths are needed:
   // 1) DOM observer (fast when mutations fire),
   // 2) snapshot poller (fallback when observers miss or JS stalls).
@@ -80,6 +111,7 @@ export async function waitForAssistantResponse(
     minTurnIndex,
     pollerAbort.signal,
     logger,
+    domContext,
   ).then(
     (value) => ({ kind: "poll" as const, value }),
     (error) => {
@@ -120,7 +152,13 @@ export async function waitForAssistantResponse(
       } else if (source === "poll") {
         throw error;
       } else if (source === "evaluation") {
-        const recovered = await recoverAssistantResponse(Runtime, timeoutMs, logger, minTurnIndex);
+        const recovered = await recoverAssistantResponse(
+          Runtime,
+          timeoutMs,
+          logger,
+          minTurnIndex,
+          domContext,
+        );
         if (recovered) {
           return recovered;
         }
@@ -142,7 +180,13 @@ export async function waitForAssistantResponse(
     logger("[browser] [response] evaluation result unparseable — attempting recovery");
     let remainingMs = Math.max(0, timeoutMs - (Date.now() - start));
     if (remainingMs > 0) {
-      const recovered = await recoverAssistantResponse(Runtime, remainingMs, logger, minTurnIndex);
+      const recovered = await recoverAssistantResponse(
+        Runtime,
+        remainingMs,
+        logger,
+        minTurnIndex,
+        domContext,
+      );
       if (recovered) {
         return recovered;
       }
@@ -162,7 +206,13 @@ export async function waitForAssistantResponse(
   }
 
   logger(`[browser] [response] evaluation parsed — ${parsed.text.length} chars, messageId=${parsed.meta.messageId ?? "none"}`);
-  const refreshed = await refreshAssistantSnapshot(Runtime, parsed, logger, minTurnIndex);
+  const refreshed = await refreshAssistantSnapshot(
+    Runtime,
+    parsed,
+    logger,
+    minTurnIndex,
+    domContext,
+  );
   const candidate = refreshed ?? parsed;
   if (refreshed) {
     logger(`[browser] [response] snapshot refreshed — ${parsed.text.length}→${refreshed.text.length} chars`);
@@ -171,14 +221,21 @@ export async function waitForAssistantResponse(
   const elapsedMs = Date.now() - start;
   const remainingMs = Math.max(0, timeoutMs - elapsedMs);
   if (remainingMs > 0) {
-    const generationState = await readAssistantGenerationUiState(Runtime);
+    const generationState = await readAssistantGenerationUiState(Runtime, domContext);
     const dbg = generationState.debug;
     logger(`[browser] [response] post-eval state — stop=${generationState.stopVisible} completion=${generationState.completionVisible} turns=${dbg?.turnCount ?? "?"} copyGlobal=${dbg?.copyButtonGlobal ?? "?"} copyInTurn=${dbg?.copyButtonInTurn ?? "?"}`);
     if (generationState.stopVisible) {
       const secondPollerTimeout = Math.min(remainingMs, SECOND_POLLER_MAX_TIMEOUT_MS);
       logger(`[browser] [response] entering second poller — candidate=${candidate.text.length} chars, timeout=${secondPollerTimeout}ms`);
       try {
-        const completed = await pollAssistantCompletion(Runtime, secondPollerTimeout, minTurnIndex, undefined, logger);
+        const completed = await pollAssistantCompletion(
+          Runtime,
+          secondPollerTimeout,
+          minTurnIndex,
+          undefined,
+          logger,
+          domContext,
+        );
         if (completed) {
           logger(`[browser] [response] second poller completed — ${completed.text.length} chars`);
           return completed;
@@ -196,7 +253,60 @@ export async function waitForAssistantResponse(
 export async function readAssistantSnapshot(
   Runtime: ChromeClient["Runtime"],
   minTurnIndex?: number,
+  domContextArg?: AssistantDomContext | null,
 ): Promise<AssistantSnapshot | null> {
+  const domContext = domContextArg ?? (await createAssistantDomContext(Runtime, () => {}));
+  if (domContext) {
+    try {
+      const turn = await domContext.session.withRepair("assistant", () =>
+        domContext.session.resolve("assistant.latestTurn", { refresh: true }),
+      );
+      if (turn.ok && turn.oracleId) {
+        const snapshot = await domContext.surface.readSnapshot();
+        const { result: metaResult } = await Runtime.evaluate({
+          expression: `(() => {
+            const node = document.querySelector('[data-oracle-id="${turn.oracleId}"]');
+            const container =
+              node?.closest?.(${JSON.stringify(CONVERSATION_TURN_SELECTOR)}) ?? node ?? null;
+            return {
+              messageId:
+                container?.getAttribute?.('data-message-id') ??
+                node?.getAttribute?.('data-message-id') ??
+                null,
+              turnId:
+                node?.getAttribute?.('data-oracle-id') ??
+                container?.getAttribute?.('data-testid') ??
+                null,
+            };
+          })()`,
+          returnByValue: true,
+        });
+        const meta = (metaResult?.value ?? {}) as {
+          messageId?: string | null;
+          turnId?: string | null;
+        };
+        const normalized: AssistantSnapshot = {
+          text: snapshot.text,
+          html: snapshot.html,
+          turnIndex: snapshot.turnIndex,
+          turnId: meta.turnId ?? snapshot.oracleId ?? null,
+          messageId: meta.messageId ?? null,
+        };
+        if (typeof minTurnIndex === "number" && Number.isFinite(minTurnIndex)) {
+          const turnIndex =
+            typeof normalized.turnIndex === "number" ? normalized.turnIndex : null;
+          if (turnIndex !== null && turnIndex < minTurnIndex) {
+            return null;
+          }
+        }
+        if (normalized.text?.trim()) {
+          return normalized;
+        }
+      }
+    } catch {
+      // Fall back to the legacy snapshot expression.
+    }
+  }
   const { result } = await Runtime.evaluate({
     expression: buildAssistantSnapshotExpression(minTurnIndex),
     returnByValue: true,
@@ -222,7 +332,22 @@ export async function captureAssistantMarkdown(
   Runtime: ChromeClient["Runtime"],
   meta: { messageId?: string | null; turnId?: string | null },
   logger: BrowserLogger,
+  domContextArg?: AssistantDomContext | null,
 ): Promise<string | null> {
+  const domContext = domContextArg ?? (await createAssistantDomContext(Runtime, logger));
+  if (domContext) {
+    try {
+      const snapshot = await domContext.surface.readSnapshot();
+      if (snapshot.text?.trim()) {
+        const markdown = await domContext.surface.copyMarkdown();
+        if (typeof markdown === "string" && markdown.trim()) {
+          return markdown;
+        }
+      }
+    } catch {
+      // Fall back to the legacy clipboard expression.
+    }
+  }
   const { result } = await Runtime.evaluate({
     expression: buildCopyExpression(meta),
     returnByValue: true,
@@ -265,6 +390,7 @@ async function recoverAssistantResponse(
   timeoutMs: number,
   logger: BrowserLogger,
   minTurnIndex?: number,
+  domContext?: AssistantDomContext | null,
 ): Promise<{
   text: string;
   html?: string;
@@ -276,7 +402,7 @@ async function recoverAssistantResponse(
   }
   const recovered = await waitForCondition(
     async () => {
-      const snapshot = await readAssistantSnapshot(Runtime, minTurnIndex);
+      const snapshot = await readAssistantSnapshot(Runtime, minTurnIndex, domContext);
       return normalizeAssistantSnapshot(snapshot);
     },
     recoveryTimeoutMs,
@@ -345,6 +471,7 @@ async function refreshAssistantSnapshot(
   },
   logger: BrowserLogger,
   minTurnIndex?: number,
+  domContext?: AssistantDomContext | null,
 ): Promise<{
   text: string;
   html?: string;
@@ -360,7 +487,9 @@ async function refreshAssistantSnapshot(
   const stableTarget = 3;
   while (Date.now() < deadline) {
     // Learned: short/fast answers can race; poll a few extra cycles to pick up messageId + full text.
-    const latestSnapshot = await readAssistantSnapshot(Runtime, minTurnIndex).catch(() => null);
+    const latestSnapshot = await readAssistantSnapshot(Runtime, minTurnIndex, domContext).catch(
+      () => null,
+    );
     const latest = normalizeAssistantSnapshot(latestSnapshot);
     if (latest) {
       if (
@@ -411,6 +540,7 @@ async function pollAssistantCompletion(
   minTurnIndex?: number,
   abortSignal?: AbortSignal,
   logger?: BrowserLogger,
+  domContext?: AssistantDomContext | null,
 ): Promise<{
   text: string;
   html?: string;
@@ -445,6 +575,7 @@ async function pollAssistantCompletion(
           logger ?? (() => {}),
           minTurnIndex,
           lastPartialText,
+          domContext,
         );
         consecutiveEvalFailures = 0;
       } catch (err) {
@@ -462,7 +593,7 @@ async function pollAssistantCompletion(
       debug?: { turnCount: number; lastAssistantFound: boolean; copyButtonGlobal: boolean; copyButtonInTurn: boolean };
     };
     try {
-      generationState = await readAssistantGenerationUiState(Runtime);
+      generationState = await readAssistantGenerationUiState(Runtime, domContext);
       consecutiveEvalFailures = 0;
     } catch (evalError) {
       consecutiveEvalFailures += 1;
@@ -478,7 +609,11 @@ async function pollAssistantCompletion(
     if (!generationState.stopVisible && lastStopVisible) {
       try {
         lastPartialText = await capturePartialAssistantProgress(
-          Runtime, logger ?? (() => {}), minTurnIndex, lastPartialText,
+          Runtime,
+          logger ?? (() => {}),
+          minTurnIndex,
+          lastPartialText,
+          domContext,
         );
       } catch {
         // best-effort
@@ -497,7 +632,11 @@ async function pollAssistantCompletion(
     if (noStopStableCycles >= 5 && lastPartialText.length === 0) {
       try {
         lastPartialText = await capturePartialAssistantProgress(
-          Runtime, logger ?? (() => {}), minTurnIndex, lastPartialText,
+          Runtime,
+          logger ?? (() => {}),
+          minTurnIndex,
+          lastPartialText,
+          domContext,
         );
       } catch {
         // best-effort
@@ -512,7 +651,7 @@ async function pollAssistantCompletion(
         logger(`[browser] [poll] ${consecutiveEvalFailures} consecutive eval failures — attempting final snapshot capture`);
       }
       try {
-        const snapshot = await readAssistantSnapshot(Runtime, minTurnIndex);
+        const snapshot = await readAssistantSnapshot(Runtime, minTurnIndex, domContext);
         const result = normalizeAssistantSnapshot(snapshot);
         if (result && result.text.length >= MIN_PARTIAL_CHARS) {
           if (logger) {
@@ -596,7 +735,8 @@ async function pollAssistantCompletion(
     return null;
   }
   const snapshot = await readAssistantSnapshot(Runtime, minTurnIndex);
-  const result = normalizeAssistantSnapshot(snapshot);
+  const snapshotFromDom = domContext ? await readAssistantSnapshot(Runtime, minTurnIndex, domContext) : snapshot;
+  const result = normalizeAssistantSnapshot(snapshotFromDom);
   if (logger) {
     logger(
       `[browser] [poll] snapshot captured — ${result?.text.length ?? 0} chars`,
@@ -610,8 +750,9 @@ async function capturePartialAssistantProgress(
   logger: BrowserLogger,
   minTurnIndex: number | undefined,
   lastPartialText: string,
+  domContext?: AssistantDomContext | null,
 ): Promise<string> {
-  const snapshot = await readAssistantSnapshot(Runtime, minTurnIndex).catch(() => null);
+  const snapshot = await readAssistantSnapshot(Runtime, minTurnIndex, domContext).catch(() => null);
   const normalized = normalizeAssistantSnapshot(snapshot);
   if (!normalized?.text) {
     return lastPartialText;
@@ -626,15 +767,28 @@ async function capturePartialAssistantProgress(
 
 async function readAssistantGenerationUiState(
   Runtime: ChromeClient["Runtime"],
+  domContext?: AssistantDomContext | null,
 ): Promise<{
   stopVisible: boolean;
   completionVisible: boolean;
   debug?: { turnCount: number; lastAssistantFound: boolean; copyButtonGlobal: boolean; copyButtonInTurn: boolean };
 }> {
   try {
+    let latestTurnOracleId: string | null = null;
+    if (domContext) {
+      try {
+        const latestTurn = await domContext.session.withRepair("assistant", () =>
+          domContext.session.resolve("assistant.latestTurn", { refresh: true }),
+        );
+        latestTurnOracleId = latestTurn.ok ? latestTurn.oracleId ?? null : null;
+      } catch {
+        latestTurnOracleId = null;
+      }
+    }
     const { result } = await Runtime.evaluate({
       expression: `(() => {
         const stopVisible = Boolean(document.querySelector(${JSON.stringify(STOP_BUTTON_SELECTOR)}));
+        const latestTurnOracleId = ${JSON.stringify(latestTurnOracleId)};
 
         const CONV_SEL = ${JSON.stringify(CONVERSATION_TURN_SELECTOR)};
         const ASST_SEL = ${JSON.stringify(ASSISTANT_ROLE_SELECTOR)};
@@ -653,16 +807,43 @@ async function readAssistantGenerationUiState(
 
         const copyButtonGlobal = Boolean(document.querySelector(FINISH_SEL));
 
+        const resolveLatestAssistantTurn = () => {
+          if (latestTurnOracleId) {
+            const node = document.querySelector('[data-oracle-id="' + latestTurnOracleId + '"]');
+            if (node instanceof HTMLElement) {
+              return node;
+            }
+          }
+          const oracle = window.__oracle;
+          if (oracle && typeof oracle.resolve === 'function') {
+            const resolved = oracle.resolve('assistant.latestTurn', { refresh: true });
+            if (resolved?.ok && resolved?.oracleId) {
+              const node = document.querySelector('[data-oracle-id="' + resolved.oracleId + '"]');
+              if (node instanceof HTMLElement) {
+                return node;
+              }
+            }
+          }
+          return null;
+        };
+
         let completionVisible = false;
         let lastAssistantFound = false;
         let copyButtonInTurn = false;
         const turns = document.querySelectorAll(CONV_SEL);
-        for (let i = turns.length - 1; i >= 0; i--) {
-          if (isAssistantTurn(turns[i])) {
-            lastAssistantFound = true;
-            copyButtonInTurn = Boolean(turns[i].querySelector(FINISH_SEL));
-            completionVisible = copyButtonInTurn;
-            break;
+        const latestAssistantTurn = resolveLatestAssistantTurn();
+        if (latestAssistantTurn) {
+          lastAssistantFound = true;
+          copyButtonInTurn = Boolean(latestAssistantTurn.querySelector(FINISH_SEL));
+          completionVisible = copyButtonInTurn;
+        } else {
+          for (let i = turns.length - 1; i >= 0; i--) {
+            if (isAssistantTurn(turns[i])) {
+              lastAssistantFound = true;
+              copyButtonInTurn = Boolean(turns[i].querySelector(FINISH_SEL));
+              completionVisible = copyButtonInTurn;
+              break;
+            }
           }
         }
 
@@ -817,6 +998,26 @@ function buildResponseObserverExpression(timeoutMs: number, minTurnIndex?: numbe
       return Boolean(node.querySelector(ASSISTANT_SELECTOR) || node.querySelector('[data-testid*="assistant"]'));
     };
 
+    const resolveLatestAssistantTurn = () => {
+      const oracle = window.__oracle;
+      if (oracle && typeof oracle.resolve === 'function') {
+        const resolved = oracle.resolve('assistant.latestTurn', { refresh: true });
+        if (resolved?.ok && resolved?.oracleId) {
+          const node = document.querySelector('[data-oracle-id="' + resolved.oracleId + '"]');
+          if (node instanceof HTMLElement) {
+            return node;
+          }
+        }
+      }
+      const turns = Array.from(document.querySelectorAll(CONVERSATION_SELECTOR));
+      for (let i = turns.length - 1; i >= 0; i -= 1) {
+        if (isAssistantTurn(turns[i])) {
+          return turns[i];
+        }
+      }
+      return null;
+    };
+
     const MIN_TURN_INDEX = ${minTurnLiteral};
     ${buildAssistantExtractor("extractFromTurns")}
     // Learned: some layouts (project view) render markdown without assistant turn wrappers.
@@ -914,14 +1115,7 @@ function buildResponseObserverExpression(timeoutMs: number, minTurnIndex?: numbe
 
     // Check if the last assistant turn has finished (scoped to avoid detecting old turns).
     const isLastAssistantTurnFinished = () => {
-      const turns = Array.from(document.querySelectorAll(CONVERSATION_SELECTOR));
-      let lastAssistantTurn = null;
-      for (let i = turns.length - 1; i >= 0; i--) {
-        if (isAssistantTurn(turns[i])) {
-          lastAssistantTurn = turns[i];
-          break;
-        }
-      }
+      const lastAssistantTurn = resolveLatestAssistantTurn();
       if (!lastAssistantTurn) return false;
       // Check for action buttons in this specific turn
       if (lastAssistantTurn.querySelector(FINISHED_SELECTOR)) return true;
@@ -1016,6 +1210,8 @@ function buildAssistantExtractor(functionName: string): string {
       return Boolean(node.querySelector(ASSISTANT_SELECTOR) || node.querySelector('[data-testid*="assistant"]'));
     };
 
+    const oracle = window.__oracle;
+
     const expandCollapsibles = (root) => {
       const buttons = Array.from(root.querySelectorAll('button'));
       for (const button of buttons) {
@@ -1033,11 +1229,9 @@ function buildAssistantExtractor(functionName: string): string {
       }
     };
 
-    const turns = Array.from(document.querySelectorAll(CONVERSATION_SELECTOR));
-    for (let index = turns.length - 1; index >= 0; index -= 1) {
-      const turn = turns[index];
-      if (!isAssistantTurn(turn)) {
-        continue;
+    const buildSnapshot = (turn, indexHint = null) => {
+      if (!(turn instanceof HTMLElement)) {
+        return null;
       }
       const messageRoot = turn.querySelector(ASSISTANT_SELECTOR) ?? turn;
       expandCollapsibles(messageRoot);
@@ -1051,16 +1245,50 @@ function buildAssistantExtractor(functionName: string): string {
         messageRoot.querySelector('[class*="markdown"]');
       const contentRoot = preferred ?? messageRoot;
       if (!contentRoot) {
-        continue;
+        return null;
       }
       const innerText = contentRoot?.innerText ?? '';
       const textContent = contentRoot?.textContent ?? '';
       const text = innerText.trim().length > 0 ? innerText : textContent;
       const html = contentRoot?.innerHTML ?? '';
-      const messageId = messageRoot.getAttribute('data-message-id');
-      const turnId = messageRoot.getAttribute('data-testid');
+      const messageId =
+        messageRoot.getAttribute('data-message-id') ||
+        turn.getAttribute('data-message-id') ||
+        null;
+      const oracleId =
+        oracle && typeof oracle.mark === 'function' ? oracle.mark(turn, 'assistant.latestTurn') : null;
+      const turnId = oracleId || messageRoot.getAttribute('data-testid') || turn.getAttribute('data-testid') || null;
       if (text.trim()) {
-        return { text, html, messageId, turnId, turnIndex: index };
+        return { text, html, messageId, turnId, turnIndex: indexHint };
+      }
+      return null;
+    };
+
+    if (oracle && typeof oracle.resolve === 'function') {
+      const resolved = oracle.resolve('assistant.latestTurn', { refresh: true });
+      if (resolved?.ok && resolved?.oracleId) {
+        const node = document.querySelector('[data-oracle-id="' + resolved.oracleId + '"]');
+        if (node instanceof HTMLElement) {
+          const turns = Array.from(document.querySelectorAll(CONVERSATION_SELECTOR));
+          const turnNode = node.closest(CONVERSATION_SELECTOR) || node;
+          const turnIndex = turns.indexOf(turnNode);
+          const snapshot = buildSnapshot(turnNode, turnIndex >= 0 ? turnIndex : null);
+          if (snapshot) {
+            return snapshot;
+          }
+        }
+      }
+    }
+
+    const turns = Array.from(document.querySelectorAll(CONVERSATION_SELECTOR));
+    for (let index = turns.length - 1; index >= 0; index -= 1) {
+      const turn = turns[index];
+      if (!isAssistantTurn(turn)) {
+        continue;
+      }
+      const snapshot = buildSnapshot(turn, index);
+      if (snapshot) {
+        return snapshot;
       }
     }
     return null;
@@ -1211,6 +1439,16 @@ function buildCopyExpression(meta: { messageId?: string | null; turnId?: string 
 
     const locateButton = () => {
       const hint = ${JSON.stringify(meta ?? {})};
+      const oracle = window.__oracle;
+      if (oracle && typeof oracle.resolve === 'function') {
+        const resolved = oracle.resolve('assistant.copyButton', { refresh: true });
+        if (resolved?.ok && resolved?.oracleId) {
+          const node = document.querySelector('[data-oracle-id="' + resolved.oracleId + '"]');
+          if (node) {
+            return node;
+          }
+        }
+      }
       if (hint?.messageId) {
         const node = document.querySelector('[data-message-id="' + hint.messageId + '"]');
         const buttons = node ? Array.from(node.querySelectorAll('${COPY_BUTTON_SELECTOR}')) : [];
@@ -1220,7 +1458,9 @@ function buildCopyExpression(meta: { messageId?: string | null; turnId?: string 
         }
       }
       if (hint?.turnId) {
-        const node = document.querySelector('[data-testid="' + hint.turnId + '"]');
+        const node =
+          document.querySelector('[data-oracle-id="' + hint.turnId + '"]') ||
+          document.querySelector('[data-testid="' + hint.turnId + '"]');
         const buttons = node ? Array.from(node.querySelectorAll('${COPY_BUTTON_SELECTOR}')) : [];
         const button = buttons.at(-1) ?? null;
         if (button) {

@@ -10,6 +10,11 @@ import {
 } from "../constants.js";
 import { delay } from "../utils.js";
 import { logDomFailure } from "../domDebug.js";
+import {
+  AttachmentSurface,
+  ComposerSurface,
+  getChatgptDomSession,
+} from "../dom/index.js";
 import { buildClickDispatcher } from "./domEvents.js";
 import { BrowserAutomationError } from "../../oracle/errors.js";
 
@@ -20,6 +25,12 @@ const ENTER_KEY_EVENT = {
   nativeVirtualKeyCode: 13,
 } as const;
 const ENTER_KEY_TEXT = "\r";
+
+interface PromptDomContext {
+  session: ReturnType<typeof getChatgptDomSession>;
+  composer: ComposerSurface;
+  attachments: AttachmentSurface;
+}
 
 export async function submitPrompt(
   deps: {
@@ -35,7 +46,164 @@ export async function submitPrompt(
   const { runtime, input } = deps;
 
   await waitForDomReady(runtime, logger, deps.inputTimeoutMs ?? undefined);
+  const domContext = await createPromptDomContext(runtime, input, logger);
   const encodedPrompt = JSON.stringify(prompt);
+  const focusResult = await focusComposerInput(runtime, domContext);
+  if (!focusResult) {
+    await logDomFailure(runtime, logger, "focus-textarea");
+    throw new Error("Failed to focus prompt textarea");
+  }
+
+  await input.insertText({ text: prompt });
+
+  // Some pages (notably ChatGPT when subscriptions/widgets load) need a brief settle
+  // before the send button becomes enabled; give it a short breather to avoid races.
+  await delay(500);
+
+  const composerInputOracleId = await resolvePromptOracleId(domContext, "composer.input");
+  const primarySelectorLiteral = JSON.stringify(PROMPT_PRIMARY_SELECTOR);
+  const fallbackSelectorLiteral = JSON.stringify(PROMPT_FALLBACK_SELECTOR);
+  const verification = await runtime.evaluate({
+    expression: buildComposerValueProbeExpression(composerInputOracleId),
+    returnByValue: true,
+  });
+
+  const editorTextRaw = verification.result?.value?.editorText ?? "";
+  const fallbackValueRaw = verification.result?.value?.fallbackValue ?? "";
+  const activeValueRaw = verification.result?.value?.activeValue ?? "";
+  const editorTextTrimmed = editorTextRaw?.trim?.() ?? "";
+  const fallbackValueTrimmed = fallbackValueRaw?.trim?.() ?? "";
+  const activeValueTrimmed = activeValueRaw?.trim?.() ?? "";
+  if (!editorTextTrimmed && !fallbackValueTrimmed && !activeValueTrimmed) {
+    // Learned: occasionally Input.insertText doesn't land in the editor; force textContent/value + input events.
+    await runtime.evaluate({
+      expression: buildComposerTextWriteExpression(encodedPrompt, composerInputOracleId),
+    });
+  }
+
+  const promptLength = prompt.length;
+  const postVerification = await runtime.evaluate({
+    expression: buildComposerValueProbeExpression(composerInputOracleId),
+    returnByValue: true,
+  });
+  const observedEditor = postVerification.result?.value?.editorText ?? "";
+  const observedFallback = postVerification.result?.value?.fallbackValue ?? "";
+  const observedActive = postVerification.result?.value?.activeValue ?? "";
+  const observedLength = Math.max(
+    observedEditor.length,
+    observedFallback.length,
+    observedActive.length,
+  );
+  if (promptLength >= 50_000 && observedLength > 0 && observedLength < promptLength - 2_000) {
+    // Learned: very large prompts can truncate silently; fail fast so we can fall back to file uploads.
+    await logDomFailure(runtime, logger, "prompt-too-large");
+    throw new BrowserAutomationError(
+      "Prompt appears truncated in the composer (likely too large).",
+      {
+        stage: "submit-prompt",
+        code: "prompt-too-large",
+        promptLength,
+        observedLength,
+      },
+    );
+  }
+
+  const hasExpectedAttachments = Array.isArray(deps?.attachmentNames) && deps.attachmentNames.length > 0;
+  const clicked = await attemptSendButton(runtime, logger, deps?.attachmentNames, domContext);
+  logger(`[browser] [submit] promptLength=${promptLength}, method=${clicked ? "button" : "enter"}`);
+  if (!clicked) {
+    // Before falling back to Enter key, verify attachments are present if expected.
+    // Learned: with ChatGPT UI lag, attachments may not be ready when attemptSendButton times out;
+    // submitting via Enter without the attachment wastes the oracle turn.
+    if (hasExpectedAttachments) {
+      const attachmentsReady = await areAttachmentsReady(runtime, domContext, deps.attachmentNames!);
+      if (!attachmentsReady) {
+        logger(`[browser] [submit] attachments not ready, aborting submit to avoid sending without attachment`);
+        throw new BrowserAutomationError(
+          "Attachments not present in composer before submit — aborting to avoid sending prompt without attachment.",
+          {
+            stage: "submit-prompt",
+            code: "attachments-not-ready",
+            expectedAttachments: deps.attachmentNames,
+          },
+        );
+      }
+      logger(`[browser] [submit] attachments verified present before Enter key fallback`);
+    }
+    await input.dispatchKeyEvent({
+      type: "keyDown",
+      ...ENTER_KEY_EVENT,
+      text: ENTER_KEY_TEXT,
+      unmodifiedText: ENTER_KEY_TEXT,
+    });
+    await input.dispatchKeyEvent({
+      type: "keyUp",
+      ...ENTER_KEY_EVENT,
+    });
+    logger("Submitted prompt via Enter key");
+  } else {
+    logger("Clicked send button");
+  }
+
+  const commitTimeoutMs = Math.max(60_000, deps.inputTimeoutMs ?? 0);
+  // Learned: the send button can succeed but the turn doesn't appear immediately; verify commit via turns/stop button.
+  const verifyResult = await verifyPromptCommitted(
+    runtime,
+    prompt,
+    commitTimeoutMs,
+    logger,
+    deps.baselineTurns ?? undefined,
+  );
+  logger(`[browser] [submit] verifyPromptCommitted succeeded`);
+  return verifyResult;
+}
+
+async function createPromptDomContext(
+  runtime: ChromeClient["Runtime"],
+  input: ChromeClient["Input"],
+  logger: BrowserLogger,
+): Promise<PromptDomContext | null> {
+  try {
+    const session = getChatgptDomSession(runtime, input, logger);
+    const health = await session.bootstrap([
+      "composer.root",
+      "composer.input",
+      "composer.sendButton",
+      "attachments.fileInput",
+      "attachments.removeButton",
+    ]);
+    if (!health || typeof health !== "object" || health.ok !== true) {
+      throw new Error("bootstrap returned unhealthy result");
+    }
+    return {
+      session,
+      composer: new ComposerSurface(session, runtime, input, logger),
+      attachments: new AttachmentSurface(session, runtime, input, logger),
+    };
+  } catch (error) {
+    logger(
+      `[browser] [dom] prompt bootstrap failed, falling back to inline selectors: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    return null;
+  }
+}
+
+async function focusComposerInput(
+  runtime: ChromeClient["Runtime"],
+  domContext: PromptDomContext | null,
+): Promise<boolean> {
+  if (domContext) {
+    try {
+      const resolved = await domContext.composer.focusInput();
+      if (resolved?.oracleId) {
+        return true;
+      }
+    } catch {
+      // Fall back to the legacy selector path below.
+    }
+  }
   const focusResult = await runtime.evaluate({
     expression: `(() => {
       ${buildClickDispatcher()}
@@ -84,178 +252,128 @@ export async function submitPrompt(
     returnByValue: true,
     awaitPromise: true,
   });
-  if (!focusResult.result?.value?.focused) {
-    await logDomFailure(runtime, logger, "focus-textarea");
-    throw new Error("Failed to focus prompt textarea");
+  return Boolean(focusResult.result?.value?.focused);
+}
+
+async function resolvePromptOracleId(
+  domContext: PromptDomContext | null,
+  key: "composer.input" | "composer.sendButton",
+): Promise<string | undefined> {
+  if (!domContext) {
+    return undefined;
   }
+  try {
+    const resolved = await domContext.session.resolve(key);
+    return resolved.ok ? resolved.oracleId : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
-  await input.insertText({ text: prompt });
-
-  // Some pages (notably ChatGPT when subscriptions/widgets load) need a brief settle
-  // before the send button becomes enabled; give it a short breather to avoid races.
-  await delay(500);
-
+function buildComposerValueProbeExpression(composerInputOracleId?: string): string {
   const primarySelectorLiteral = JSON.stringify(PROMPT_PRIMARY_SELECTOR);
   const fallbackSelectorLiteral = JSON.stringify(PROMPT_FALLBACK_SELECTOR);
-  const verification = await runtime.evaluate({
-    expression: `(() => {
-      const editor = document.querySelector(${primarySelectorLiteral});
-      const fallback = document.querySelector(${fallbackSelectorLiteral});
-      const inputSelectors = ${JSON.stringify(INPUT_SELECTORS)};
-      const readValue = (node) => {
-        if (!node) return '';
-        if (node instanceof HTMLTextAreaElement) return node.value ?? '';
-        return node.innerText ?? '';
-      };
-      const isVisible = (node) => {
-        if (!node || typeof node.getBoundingClientRect !== 'function') return false;
-        const rect = node.getBoundingClientRect();
-        return rect.width > 0 && rect.height > 0;
-      };
-      const candidates = inputSelectors
-        .map((selector) => document.querySelector(selector))
-        .filter((node) => Boolean(node));
-      const active = candidates.find((node) => isVisible(node)) || candidates[0] || null;
-      return {
-        editorText: editor?.innerText ?? '',
-        fallbackValue: fallback?.value ?? '',
-        activeValue: active ? readValue(active) : '',
-      };
-    })()`,
-    returnByValue: true,
-  });
+  return `(() => {
+    const oracleId = ${JSON.stringify(composerInputOracleId ?? null)};
+    const editor = document.querySelector(${primarySelectorLiteral});
+    const fallback = document.querySelector(${fallbackSelectorLiteral});
+    const oracleNode = oracleId
+      ? document.querySelector('[data-oracle-id="' + oracleId + '"]')
+      : null;
+    const inputSelectors = ${JSON.stringify(INPUT_SELECTORS)};
+    const readValue = (node) => {
+      if (!node) return '';
+      if (node instanceof HTMLTextAreaElement) return node.value ?? '';
+      return node.innerText ?? '';
+    };
+    const isVisible = (node) => {
+      if (!node || typeof node.getBoundingClientRect !== 'function') return false;
+      const rect = node.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    };
+    const candidates = inputSelectors
+      .map((selector) => document.querySelector(selector))
+      .filter((node) => Boolean(node));
+    const active =
+      (oracleNode && isVisible(oracleNode) ? oracleNode : null) ||
+      candidates.find((node) => isVisible(node)) ||
+      oracleNode ||
+      candidates[0] ||
+      null;
+    return {
+      editorText: editor?.innerText ?? '',
+      fallbackValue: fallback?.value ?? '',
+      activeValue: active ? readValue(active) : '',
+    };
+  })()`;
+}
 
-  const editorTextRaw = verification.result?.value?.editorText ?? "";
-  const fallbackValueRaw = verification.result?.value?.fallbackValue ?? "";
-  const activeValueRaw = verification.result?.value?.activeValue ?? "";
-  const editorTextTrimmed = editorTextRaw?.trim?.() ?? "";
-  const fallbackValueTrimmed = fallbackValueRaw?.trim?.() ?? "";
-  const activeValueTrimmed = activeValueRaw?.trim?.() ?? "";
-  if (!editorTextTrimmed && !fallbackValueTrimmed && !activeValueTrimmed) {
-    // Learned: occasionally Input.insertText doesn't land in the editor; force textContent/value + input events.
-    await runtime.evaluate({
-      expression: `(() => {
-        const fallback = document.querySelector(${fallbackSelectorLiteral});
-        if (fallback) {
-          if (fallback instanceof HTMLTextAreaElement) {
-            fallback.value = ${encodedPrompt};
-          } else {
-            fallback.textContent = ${encodedPrompt};
-          }
-          fallback.dispatchEvent(new InputEvent('input', { bubbles: true, data: ${encodedPrompt}, inputType: 'insertFromPaste' }));
-          fallback.dispatchEvent(new Event('change', { bubbles: true }));
-        }
-        const editor = document.querySelector(${primarySelectorLiteral});
-        if (editor) {
-          editor.textContent = ${encodedPrompt};
-          // Nudge ProseMirror to register the textContent write so its state/send-button updates
-          editor.dispatchEvent(new InputEvent('input', { bubbles: true, data: ${encodedPrompt}, inputType: 'insertFromPaste' }));
-        }
-      })()`,
-    });
-  }
-
-  const promptLength = prompt.length;
-  const postVerification = await runtime.evaluate({
-    expression: `(() => {
-      const editor = document.querySelector(${primarySelectorLiteral});
-      const fallback = document.querySelector(${fallbackSelectorLiteral});
-      const inputSelectors = ${JSON.stringify(INPUT_SELECTORS)};
-      const readValue = (node) => {
-        if (!node) return '';
-        if (node instanceof HTMLTextAreaElement) return node.value ?? '';
-        return node.innerText ?? '';
-      };
-      const isVisible = (node) => {
-        if (!node || typeof node.getBoundingClientRect !== 'function') return false;
-        const rect = node.getBoundingClientRect();
-        return rect.width > 0 && rect.height > 0;
-      };
-      const candidates = inputSelectors
-        .map((selector) => document.querySelector(selector))
-        .filter((node) => Boolean(node));
-      const active = candidates.find((node) => isVisible(node)) || candidates[0] || null;
-      return {
-        editorText: editor?.innerText ?? '',
-        fallbackValue: fallback?.value ?? '',
-        activeValue: active ? readValue(active) : '',
-      };
-    })()`,
-    returnByValue: true,
-  });
-  const observedEditor = postVerification.result?.value?.editorText ?? "";
-  const observedFallback = postVerification.result?.value?.fallbackValue ?? "";
-  const observedActive = postVerification.result?.value?.activeValue ?? "";
-  const observedLength = Math.max(
-    observedEditor.length,
-    observedFallback.length,
-    observedActive.length,
-  );
-  if (promptLength >= 50_000 && observedLength > 0 && observedLength < promptLength - 2_000) {
-    // Learned: very large prompts can truncate silently; fail fast so we can fall back to file uploads.
-    await logDomFailure(runtime, logger, "prompt-too-large");
-    throw new BrowserAutomationError(
-      "Prompt appears truncated in the composer (likely too large).",
-      {
-        stage: "submit-prompt",
-        code: "prompt-too-large",
-        promptLength,
-        observedLength,
-      },
-    );
-  }
-
-  const hasExpectedAttachments = Array.isArray(deps?.attachmentNames) && deps.attachmentNames.length > 0;
-  const clicked = await attemptSendButton(runtime, logger, deps?.attachmentNames);
-  logger(`[browser] [submit] promptLength=${promptLength}, method=${clicked ? "button" : "enter"}`);
-  if (!clicked) {
-    // Before falling back to Enter key, verify attachments are present if expected.
-    // Learned: with ChatGPT UI lag, attachments may not be ready when attemptSendButton times out;
-    // submitting via Enter without the attachment wastes the oracle turn.
-    if (hasExpectedAttachments) {
-      const attachmentsReady = await runtime.evaluate({
-        expression: buildAttachmentReadyExpression(deps.attachmentNames!),
-        returnByValue: true,
-      });
-      if (!attachmentsReady?.result?.value) {
-        logger(`[browser] [submit] attachments not ready, aborting submit to avoid sending without attachment`);
-        throw new BrowserAutomationError(
-          "Attachments not present in composer before submit — aborting to avoid sending prompt without attachment.",
-          {
-            stage: "submit-prompt",
-            code: "attachments-not-ready",
-            expectedAttachments: deps.attachmentNames,
-          },
-        );
+function buildComposerTextWriteExpression(
+  encodedPrompt: string,
+  composerInputOracleId?: string,
+): string {
+  const primarySelectorLiteral = JSON.stringify(PROMPT_PRIMARY_SELECTOR);
+  const fallbackSelectorLiteral = JSON.stringify(PROMPT_FALLBACK_SELECTOR);
+  return `(() => {
+    const oracleId = ${JSON.stringify(composerInputOracleId ?? null)};
+    const fallback = document.querySelector(${fallbackSelectorLiteral});
+    const editor = document.querySelector(${primarySelectorLiteral});
+    const oracleNode = oracleId
+      ? document.querySelector('[data-oracle-id="' + oracleId + '"]')
+      : null;
+    const updateNode = (node) => {
+      if (!node) return false;
+      if (node instanceof HTMLTextAreaElement) {
+        node.value = ${encodedPrompt};
+        node.dispatchEvent(new InputEvent('input', { bubbles: true, data: ${encodedPrompt}, inputType: 'insertFromPaste' }));
+        node.dispatchEvent(new Event('change', { bubbles: true }));
+        return true;
       }
-      logger(`[browser] [submit] attachments verified present before Enter key fallback`);
+      if (node instanceof HTMLElement) {
+        node.textContent = ${encodedPrompt};
+        node.dispatchEvent(new InputEvent('input', { bubbles: true, data: ${encodedPrompt}, inputType: 'insertFromPaste' }));
+        return true;
+      }
+      return false;
+    };
+    updateNode(fallback);
+    if (!updateNode(oracleNode)) {
+      updateNode(editor);
     }
-    await input.dispatchKeyEvent({
-      type: "keyDown",
-      ...ENTER_KEY_EVENT,
-      text: ENTER_KEY_TEXT,
-      unmodifiedText: ENTER_KEY_TEXT,
-    });
-    await input.dispatchKeyEvent({
-      type: "keyUp",
-      ...ENTER_KEY_EVENT,
-    });
-    logger("Submitted prompt via Enter key");
-  } else {
-    logger("Clicked send button");
-  }
+  })()`;
+}
 
-  const commitTimeoutMs = Math.max(60_000, deps.inputTimeoutMs ?? 0);
-  // Learned: the send button can succeed but the turn doesn't appear immediately; verify commit via turns/stop button.
-  const verifyResult = await verifyPromptCommitted(
-    runtime,
-    prompt,
-    commitTimeoutMs,
-    logger,
-    deps.baselineTurns ?? undefined,
-  );
-  logger(`[browser] [submit] verifyPromptCommitted succeeded`);
-  return verifyResult;
+async function areAttachmentsReady(
+  runtime: ChromeClient["Runtime"],
+  domContext: PromptDomContext | null,
+  attachmentNames: string[],
+): Promise<boolean> {
+  if (domContext) {
+    try {
+      const checks = await Promise.all(
+        attachmentNames.map(async (name) => {
+          const signals = await domContext.attachments.readSignals(name);
+          const lower = name.toLowerCase();
+          return (
+            signals.ready &&
+            (signals.removeButtons >= attachmentNames.length ||
+              signals.matchingNames.some((value) => value.toLowerCase().includes(lower)) ||
+              signals.names.some((value) => value.toLowerCase().includes(lower)))
+          );
+        }),
+      );
+      if (checks.every(Boolean)) {
+        return true;
+      }
+    } catch {
+      // Fall back to the legacy selector probe below.
+    }
+  }
+  const attachmentsReady = await runtime.evaluate({
+    expression: buildAttachmentReadyExpression(attachmentNames),
+    returnByValue: true,
+  });
+  return attachmentsReady?.result?.value === true;
 }
 
 export async function clearPromptComposer(Runtime: ChromeClient["Runtime"], logger: BrowserLogger) {
@@ -338,8 +456,16 @@ async function waitForDomReady(
 function buildAttachmentReadyExpression(attachmentNames: string[]): string {
   const namesLiteral = JSON.stringify(attachmentNames.map((name) => name.toLowerCase()));
   return `(() => {
+    const oracle = window.__oracle;
     const names = ${namesLiteral};
+    const composerResolved =
+      oracle && typeof oracle.resolve === 'function'
+        ? oracle.resolve('composer.root', {})
+        : null;
     const composer =
+      (composerResolved?.ok && composerResolved?.oracleId
+        ? document.querySelector('[data-oracle-id="' + composerResolved.oracleId + '"]')
+        : null) ||
       document.querySelector('form') ||
       document.querySelector('div[data-testid*="composer"]') ||
       document.body ||
@@ -351,6 +477,40 @@ function buildAttachmentReadyExpression(attachmentNames: string[]): string {
       const aria = (node?.getAttribute?.('aria-label') || '').toLowerCase();
       const title = (node?.getAttribute?.('title') || '').toLowerCase();
       return text.includes(name) || aria.includes(name) || title.includes(name);
+    };
+
+    const collectSurfaceSignals = (name) => {
+      if (!oracle || typeof oracle.resolve !== 'function') return null;
+      const remove = oracle.resolve('attachments.removeButton', { refresh: true });
+      const input = oracle.resolve('attachments.fileInput', { refresh: true });
+      const removeNode =
+        remove?.ok && remove?.oracleId
+          ? document.querySelector('[data-oracle-id="' + remove.oracleId + '"]')
+          : null;
+      const inputNode =
+        input?.ok && input?.oracleId
+          ? document.querySelector('[data-oracle-id="' + input.oracleId + '"]')
+          : null;
+      const names = [];
+      if (removeNode) {
+        const text = removeNode.textContent || '';
+        const aria = removeNode.getAttribute?.('aria-label') || '';
+        const title = removeNode.getAttribute?.('title') || '';
+        if ([text, aria, title].some((value) => match({ textContent: value, getAttribute: () => value }, name))) {
+          names.push(text || aria || title);
+        }
+      }
+      let inputReady = false;
+      if (inputNode instanceof HTMLInputElement) {
+        inputReady = Array.from(inputNode.files || []).some((file) =>
+          file?.name?.toLowerCase?.().includes(name),
+        );
+      }
+      return {
+        removeCount: removeNode ? 1 : 0,
+        inputReady,
+        names,
+      };
     };
 
     const attachmentSelectors = [
@@ -377,8 +537,17 @@ function buildAttachmentReadyExpression(attachmentNames: string[]): string {
     // the attachments are present.
     const removeFileButtons = composer.querySelectorAll('[aria-label*="Remove file"]');
     const removeCountReady = removeFileButtons.length >= names.length;
+    const surfaceReady = names.every((name) => {
+      const surfaceSignals = collectSurfaceSignals(name);
+      if (!surfaceSignals) return false;
+      return (
+        surfaceSignals.inputReady ||
+        surfaceSignals.names.length > 0 ||
+        surfaceSignals.removeCount >= names.length
+      );
+    });
 
-    return chipsReady || inputsReady || removeCountReady;
+    return surfaceReady || chipsReady || inputsReady || removeCountReady;
   })()`;
 }
 
@@ -390,14 +559,20 @@ async function attemptSendButton(
   Runtime: ChromeClient["Runtime"],
   logger?: BrowserLogger,
   attachmentNames?: string[],
+  domContext?: PromptDomContext | null,
 ): Promise<boolean> {
+  const sendOracleId = await resolvePromptOracleId(domContext ?? null, "composer.sendButton");
   const script = `(() => {
     ${buildClickDispatcher()}
+    const oracleId = ${JSON.stringify(sendOracleId ?? null)};
     const selectors = ${JSON.stringify(SEND_BUTTON_SELECTORS)};
-    let button = null;
-    for (const selector of selectors) {
-      button = document.querySelector(selector);
-      if (button) break;
+    let button =
+      oracleId ? document.querySelector('[data-oracle-id="' + oracleId + '"]') : null;
+    if (!button) {
+      for (const selector of selectors) {
+        button = document.querySelector(selector);
+        if (button) break;
+      }
     }
     if (!button) return 'missing';
     const ariaDisabled = button.getAttribute('aria-disabled');
@@ -422,11 +597,8 @@ async function attemptSendButton(
   let lastAttachmentLog = 0;
   while (Date.now() < deadline) {
     if (needAttachment) {
-      const ready = await Runtime.evaluate({
-        expression: buildAttachmentReadyExpression(attachmentNames),
-        returnByValue: true,
-      });
-      if (!ready?.result?.value) {
+      const ready = await areAttachmentsReady(Runtime, domContext ?? null, attachmentNames);
+      if (!ready) {
         const now = Date.now();
         if (now - lastAttachmentLog > 5_000) {
           lastAttachmentLog = now;

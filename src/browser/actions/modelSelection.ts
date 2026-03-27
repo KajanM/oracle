@@ -11,6 +11,37 @@ import {
   logModelPickerDomProbe,
   shouldLogModelPickerDomProbe,
 } from "../modelPickerProbe.js";
+import { getChatgptDomSession, ModelPickerSurface } from "../dom/index.js";
+
+interface ModelDomContext {
+  session: ReturnType<typeof getChatgptDomSession>;
+  surface: ModelPickerSurface;
+}
+
+async function createModelDomContext(
+  Runtime: ChromeClient["Runtime"],
+  input: ChromeClient["Input"] | undefined,
+  logger: BrowserLogger,
+): Promise<ModelDomContext | null> {
+  try {
+    const session = getChatgptDomSession(Runtime, input, logger);
+    const health = await session.bootstrap(["model.trigger", "model.menu"]);
+    if (!health?.ok) {
+      throw new Error("bootstrap returned unhealthy result");
+    }
+    return {
+      session,
+      surface: new ModelPickerSurface(session, Runtime, input, logger),
+    };
+  } catch (error) {
+    logger(
+      `[browser] [dom] model bootstrap failed, falling back to inline selectors: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    return null;
+  }
+}
 
 /** If the model dropdown stays open it covers the composer; dismiss aggressively. */
 export function buildForceDismissModelPickerExpression(): string {
@@ -289,7 +320,15 @@ export async function closeOpenModelMenuBestEffort(
 async function openModelPickerTrusted(
   Runtime: ChromeClient["Runtime"],
   input: ChromeClient["Input"] | undefined,
+  domContext?: ModelDomContext | null,
 ): Promise<boolean> {
+  if (domContext) {
+    try {
+      return await domContext.surface.open();
+    } catch {
+      // Fall back to the legacy trusted open path.
+    }
+  }
   if (!input || typeof input.dispatchMouseEvent !== "function") {
     return false;
   }
@@ -378,12 +417,24 @@ async function openModelPickerTrusted(
 function buildModelStateProbeExpression(targetModel: string): string {
   const targetLiteral = JSON.stringify(targetModel);
   return `(() => {
+    const resolveModelTrigger = () => {
+      const oracle = window.__oracle;
+      if (!oracle || typeof oracle.resolve !== 'function') {
+        return document.querySelector('${MODEL_BUTTON_SELECTOR}');
+      }
+      const resolved = oracle.resolve('model.trigger', { refresh: true });
+      if (resolved?.ok && resolved?.oracleId) {
+        return document.querySelector('[data-oracle-id="' + resolved.oracleId + '"]');
+      }
+      return document.querySelector('${MODEL_BUTTON_SELECTOR}');
+    };
     const normalizeText = (value) => {
       if (!value) return '';
       return value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\\s+/g, ' ').trim();
     };
     const target = normalizeText(${targetLiteral});
-    const header = (document.querySelector('${MODEL_BUTTON_SELECTOR}')?.textContent ?? '').trim();
+    const trigger = resolveModelTrigger();
+    const header = (trigger?.textContent ?? '').trim();
     const footer = (document.querySelector('.__composer-pill-composite') || document.querySelector('[data-testid=\"composer-footer-actions\"]'))?.textContent?.trim() ?? '';
     const normalizedHeader = normalizeText(header);
     const normalizedFooter = normalizeText(footer);
@@ -550,15 +601,108 @@ async function selectModelViaTrustedClicks(
   Runtime: ChromeClient["Runtime"],
   input: ChromeClient["Input"],
   desiredModel: string,
+  domContext?: ModelDomContext | null,
 ): Promise<
   | { status: "already-selected"; label?: string | null; modelPickerInstrumentation?: { reopenTriggerClicks: number } }
   | { status: "switched"; label?: string | null; modelPickerInstrumentation?: { reopenTriggerClicks: number } }
   | { status: "option-not-found"; hint?: { temporaryChat?: boolean; availableOptions?: string[] }; modelPickerInstrumentation?: { reopenTriggerClicks: number } }
   | { status: "menu-not-open"; modelPickerInstrumentation?: { reopenTriggerClicks: number } }
 > {
-  const opened = await openModelPickerTrusted(Runtime, input);
+  const opened = await openModelPickerTrusted(Runtime, input, domContext);
   if (!opened) {
     return { status: "menu-not-open", modelPickerInstrumentation: { reopenTriggerClicks: 0 } };
+  }
+
+  if (domContext) {
+    try {
+      return await domContext.session.withRepair("modelPicker", async () => {
+        const options = await domContext.surface.listOptions();
+        const availableOptions = options
+          .map((option) => option.text)
+          .filter(Boolean)
+          .filter((label, index, arr) => arr.indexOf(label) === index)
+          .slice(0, 12);
+        const matchers = buildModelMatchersLiteral(desiredModel);
+        const normalizeText = (value: string) =>
+          value
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, " ")
+            .replace(/\s+/g, " ")
+            .trim();
+        const normalizedTarget = normalizeText(desiredModel);
+        const simpleTarget = ["pro", "thinking", "auto", "instant", "use latest model"].includes(
+          normalizedTarget,
+        )
+          ? normalizedTarget
+          : null;
+        const normalizedTokens = Array.from(new Set([normalizedTarget, ...matchers.labelTokens]))
+          .map((token) => normalizeText(token))
+          .filter(Boolean);
+        const scoreOption = (option: { text: string; oracleId: string; selected: boolean }) => {
+          const text = normalizeText(option.text);
+          const testid = option.oracleId.toLowerCase();
+          let total = 0;
+          if (simpleTarget) {
+            if (text === simpleTarget) total += 2000;
+            else if (text.startsWith(simpleTarget + " ")) total += 1800;
+            else if (text.includes(simpleTarget)) total += 900;
+            else if (
+              simpleTarget === "use latest model" &&
+              (text.startsWith("pro") || text.includes("research grade"))
+            ) {
+              total += 1800;
+            }
+          }
+          const exactMatch = matchers.testIdTokens.find((id) => id && testid === id);
+          if (exactMatch) total += 1500;
+          else {
+            const hits = matchers.testIdTokens.filter((id) => id && testid.includes(id));
+            if (hits.length > 0) total += 500;
+          }
+          if (normalizedTarget && text.includes(normalizedTarget)) total += 500;
+          for (const token of normalizedTokens) {
+            if (token && text.includes(token)) {
+              total += Math.min(120, Math.max(10, token.length * 4));
+            }
+          }
+          if (text.includes("configure")) total -= 1000;
+          return Math.max(total, 0);
+        };
+        const match = options
+          .map((option) => ({ option, score: scoreOption(option) }))
+          .filter((entry) => entry.score > 0)
+          .sort((left, right) => right.score - left.score)[0];
+        if (!match) {
+          return {
+            status: "option-not-found" as const,
+            hint: { availableOptions },
+            modelPickerInstrumentation: { reopenTriggerClicks: 0 },
+          };
+        }
+        if (match.option.selected) {
+          return {
+            status: "already-selected" as const,
+            label: match.option.text,
+            modelPickerInstrumentation: { reopenTriggerClicks: 0 },
+          };
+        }
+        const clicked = await domContext.surface.clickOption(match.option.text);
+        if (!clicked) {
+          return {
+            status: "option-not-found" as const,
+            hint: { availableOptions },
+            modelPickerInstrumentation: { reopenTriggerClicks: 0 },
+          };
+        }
+        return {
+          status: "switched" as const,
+          label: match.option.text,
+          modelPickerInstrumentation: { reopenTriggerClicks: 0 },
+        };
+      });
+    } catch {
+      // Fall through to the legacy trusted click strategy.
+    }
   }
 
   let lastAvailable: string[] = [];
@@ -636,6 +780,7 @@ export async function ensureModelSelection(
 ) {
   logger(`[browser] [model] opening model picker`);
   await logModelPickerDomProbe(Runtime, logger, "before-model-select");
+  const domContext = await createModelDomContext(Runtime, input, logger);
   const { result: stateResult } = await Runtime.evaluate({
     expression: buildModelStateProbeExpression(desiredModel),
     returnByValue: true,
@@ -652,7 +797,7 @@ export async function ensureModelSelection(
   const canTrustedOpen = Boolean(input && typeof input.dispatchMouseEvent === "function");
   const trustedResult =
     canTrustedOpen && strategy === "select" && input
-      ? await selectModelViaTrustedClicks(Runtime, input, desiredModel)
+      ? await selectModelViaTrustedClicks(Runtime, input, desiredModel, domContext)
       : null;
   const result = trustedResult
     ? trustedResult
