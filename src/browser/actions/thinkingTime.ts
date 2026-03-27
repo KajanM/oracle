@@ -119,9 +119,9 @@ function buildThinkingTimeExpression(level: ThinkingTimeLevel): string {
     const TARGET_LEVEL = ${targetLevelLiteral};
 
     const CHIP_SELECTORS = [
-      '[data-testid="composer-footer-actions"] button[aria-haspopup="menu"]',
       'button.__composer-pill[aria-haspopup="menu"]',
       '.__composer-pill-composite button[aria-haspopup="menu"]',
+      '[data-testid="composer-footer-actions"] button[aria-haspopup="menu"]',
     ];
 
     const INITIAL_WAIT_MS = 150;

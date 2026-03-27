@@ -1033,6 +1033,10 @@ export async function uploadAttachmentFile(
         let immediateInputSnapshot = await readInputSnapshot(idx);
         let hasExpectedFile = snapshotMatchesExpected(immediateInputSnapshot);
         if (!hasExpectedFile) {
+          const filename = path.basename(attachment.path);
+          const sizeInfo =
+            typeof attachment.sizeBytes === "number" ? `, size=${attachment.sizeBytes}` : "";
+          logger(`[browser] [attach] starting upload: filename=${filename}${sizeInfo}, method=${mode}`);
           if (mode === "set") {
             await dom.setFileInputFiles({ nodeId: resultNode.nodeId, files: [attachment.path] });
           } else {
@@ -1066,22 +1070,31 @@ export async function uploadAttachmentFile(
       };
 
       const dispatchInputEvents = async () => {
-        await runtime
+        const result = await runtime
           .evaluate({
             expression: `(() => {
               const input = document.querySelector('input[type="file"][data-oracle-upload-idx="${idx}"]');
-              if (!(input instanceof HTMLInputElement)) return false;
+              if (!(input instanceof HTMLInputElement)) return { ok: false, error: 'input not found' };
               try {
                 input.dispatchEvent(new Event('input', { bubbles: true }));
                 input.dispatchEvent(new Event('change', { bubbles: true }));
-                return true;
-              } catch {
-                return false;
+                return { ok: true };
+              } catch (err) {
+                return { ok: false, error: err instanceof Error ? err.message : String(err) };
               }
             })()`,
             returnByValue: true,
           })
-          .catch(() => undefined);
+          .catch((err) => {
+            logger(
+              `[browser] [warn] dispatchInputEvents evaluate failed: ${err instanceof Error ? err.message : err}`,
+            );
+            return undefined;
+          });
+        const value = result?.result?.value as { ok?: boolean; error?: string } | undefined;
+        if (value?.ok === false && value?.error) {
+          logger(`[browser] [warn] dispatchInputEvents: ${value.error}`);
+        }
       };
 
       let result = await runInputAttempt("set");
@@ -1166,6 +1179,7 @@ export async function uploadAttachmentFile(
       inputNameCandidates.some((name) => matchesExpectedName(name)) ||
       (lastInputValue && matchesExpectedName(lastInputValue));
     await waitForAttachmentVisible(runtime, expectedName, attachmentUiTimeoutMs, logger);
+    logger(`[browser] [attach] upload completed: ${path.basename(attachment.path)}`);
     logger(
       inputHasFile
         ? "Attachment queued (UI anchored, file input confirmed)"
@@ -1180,6 +1194,7 @@ export async function uploadAttachmentFile(
     (lastInputValue && matchesExpectedName(lastInputValue));
   if (await waitForAttachmentAnchored(runtime, expectedName, attachmentUiTimeoutMs)) {
     await waitForAttachmentVisible(runtime, expectedName, attachmentUiTimeoutMs, logger);
+    logger(`[browser] [attach] upload completed: ${path.basename(attachment.path)}`);
     logger(
       inputHasFile
         ? "Attachment queued (UI anchored, file input confirmed)"
@@ -1189,6 +1204,7 @@ export async function uploadAttachmentFile(
   }
 
   if (inputConfirmed || inputHasFile) {
+    logger(`[browser] [attach] upload completed: ${path.basename(attachment.path)} (input only)`);
     logger(
       "Attachment input accepted the file but UI did not acknowledge it; continuing with input confirmation only.",
     );
@@ -1275,6 +1291,7 @@ export async function clearComposerAttachments(
       const rect = el.getBoundingClientRect();
       return rect.width > 0 && rect.height > 0;
     };
+    const errors = [];
     const removeButtons = scope
       ? Array.from(scope.querySelectorAll(removeSelectors.join(','))).filter(visible)
       : [];
@@ -1285,7 +1302,9 @@ export async function clearComposerAttachments(
           button.type = 'button';
         }
         button.click();
-      } catch {}
+      } catch (err) {
+        errors.push(err instanceof Error ? err.message : String(err));
+      }
     }
     const chipCount = removeButtons.length;
     const inputs = scope ? Array.from(scope.querySelectorAll('input[type="file"]')) : [];
@@ -1293,10 +1312,12 @@ export async function clearComposerAttachments(
     for (const input of inputs) {
       if (!(input instanceof HTMLInputElement)) continue;
       inputCount += Array.from(input.files || []).length;
-      try { input.value = ''; } catch {}
+      try { input.value = ''; } catch (err) {
+        errors.push(err instanceof Error ? err.message : String(err));
+      }
     }
     const hadAttachments = chipCount > 0 || inputCount > 0 || removeButtons.length > 0;
-    return { removeClicks: removeButtons.length, chipCount, inputCount, hadAttachments };
+    return { removeClicks: removeButtons.length, chipCount, inputCount, hadAttachments, errors };
   })()`;
 
   let sawAttachments = false;
@@ -1304,8 +1325,19 @@ export async function clearComposerAttachments(
   while (Date.now() < deadline) {
     const response = await Runtime.evaluate({ expression, returnByValue: true });
     const value = response.result?.value as
-      | { removeClicks?: number; chipCount?: number; inputCount?: number; hadAttachments?: boolean }
+      | {
+          removeClicks?: number;
+          chipCount?: number;
+          inputCount?: number;
+          hadAttachments?: boolean;
+          errors?: string[];
+        }
       | undefined;
+    if (value?.errors?.length && logger) {
+      for (const err of value.errors) {
+        logger(`[browser] [warn] clearComposerAttachments: ${err}`);
+      }
+    }
     if (value?.hadAttachments) {
       sawAttachments = true;
     }
@@ -1624,11 +1656,13 @@ export async function waitForAttachmentCompletion(
         }
         const stable = Date.now() - attachmentMatchSince > stableThresholdMs;
         if (stable && value.state === "ready") {
+          logger?.("[browser] [attach] waitForAttachmentCompletion finished");
           return;
         }
         // Don't treat disabled button as complete - wait for it to become 'ready'.
         // The spinner detection is unreliable, so a disabled button likely means upload is in progress.
         if (value.state === "missing" && (value.filesAttached || fileCountSatisfied)) {
+          logger?.("[browser] [attach] waitForAttachmentCompletion finished");
           return;
         }
         // If files are attached but button isn't ready yet, give it more time but don't fail immediately.
@@ -1670,6 +1704,7 @@ export async function waitForAttachmentCompletion(
         inputEvidenceOk &&
         Date.now() - inputMatchSince > stableThresholdMs
       ) {
+        logger?.("[browser] [attach] waitForAttachmentCompletion finished");
         return;
       }
       if (!inputSeenNow && !sawInputMatch) {

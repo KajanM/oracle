@@ -23,14 +23,19 @@ const DEFAULT_CHROME_PROFILE = "Default";
 
 // Ordered array: most specific models first to ensure correct selection.
 // The browser label is passed to the model picker which fuzzy-matches against ChatGPT's UI.
+// March 2026 note: ChatGPT's header can still show "ChatGPT 5.2" even when the account default is
+// effectively "latest" / Pro via the composer footer chip. Keep browser-side mappings aligned with
+// the live picker labels instead of assuming the header text is the source of truth.
+// The current "latest" GPT-5.4 Pro path is exposed as "Use latest model", while the plain "Pro"
+// row can land on the legacy 5.2-backed Pro variant.
 const BROWSER_MODEL_LABELS: [ModelName, string][] = [
   // Most specific first (e.g., "gpt-5.2-thinking" before "gpt-5.2")
-  ["gpt-5.4-pro", "Pro"],
+  ["gpt-5.4-pro", "Use latest model"],
   ["gpt-5.2-thinking", "Thinking"],
   ["gpt-5.2-instant", "Instant"],
-  ["gpt-5.2-pro", "Pro"],
-  ["gpt-5.1-pro", "Pro"],
-  ["gpt-5-pro", "Pro"],
+  ["gpt-5.2-pro", "Use latest model"],
+  ["gpt-5.1-pro", "Use latest model"],
+  ["gpt-5-pro", "Use latest model"],
   // Base models last (least specific)
   ["gpt-5.4", "Thinking"],
   ["gpt-5.2", "Auto"],
@@ -146,7 +151,7 @@ export async function buildBrowserConfig(
     modelStrategy === "select" &&
     url &&
     isTemporaryChatUrl(url) &&
-    /\bpro\b/i.test(desiredModel ?? "")
+    (/\bpro\b/i.test(desiredModel ?? "") || /use latest model/i.test(desiredModel ?? ""))
   ) {
     throw new Error(
       "Temporary Chat mode does not expose Pro models in the ChatGPT model picker. " +

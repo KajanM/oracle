@@ -110,6 +110,7 @@ export async function resumeBrowserSession(
           promptPreview: deps.promptPreview,
         },
         15_000,
+        logger,
       );
       if (!opened) {
         throw new Error("Unable to locate prior ChatGPT conversation in sidebar.");
@@ -153,8 +154,8 @@ export async function resumeBrowserSession(
     if (client && typeof client.close === "function") {
       try {
         await client.close();
-      } catch {
-        // ignore
+      } catch (err) {
+        logger(`[browser] [warn] client.close: ${err instanceof Error ? err.message : err}`);
       }
     }
 
@@ -237,6 +238,7 @@ async function resumeBrowserSessionViaNewChrome(
         promptPreview: deps.promptPreview,
       },
       15_000,
+      logger,
     );
     if (!opened) {
       throw new Error("Unable to locate prior ChatGPT conversation in sidebar.");
@@ -264,15 +266,15 @@ async function resumeBrowserSessionViaNewChrome(
   if (client && typeof client.close === "function") {
     try {
       await client.close();
-    } catch {
-      // ignore
+    } catch (err) {
+      logger(`[browser] [warn] client.close: ${err instanceof Error ? err.message : err}`);
     }
   }
   if (!resolved.keepBrowser) {
     try {
       await chrome.kill();
-    } catch {
-      // ignore
+    } catch (err) {
+      logger(`[browser] [warn] chrome.kill: ${err instanceof Error ? err.message : err}`);
     }
     if (manualLogin) {
       await cleanupStaleProfileState(userDataDir, logger, { lockRemovalMode: "never" }).catch(

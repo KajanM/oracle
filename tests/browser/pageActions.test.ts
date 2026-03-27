@@ -29,7 +29,7 @@ describe("ensureModelSelection", () => {
       }),
     } as unknown as ChromeClient["Runtime"];
     await expect(ensureModelSelection(runtime, "GPT-5.2 Pro", logger)).resolves.toBeUndefined();
-    expect(logger).toHaveBeenCalledWith("Model picker: GPT-5.2 Pro");
+    expect(logger).toHaveBeenCalledWith(expect.stringContaining("[browser] [model] selected: GPT-5.2 Pro"));
   });
 
   test("throws when option missing", async () => {
@@ -154,7 +154,7 @@ describe("ensureNotBlocked", () => {
       evaluate: vi.fn().mockResolvedValue({ result: { value: "Just a moment..." } }),
     } as unknown as ChromeClient["Runtime"];
     await expect(ensureNotBlocked(runtime, true, logger)).rejects.toThrow(/headless mode/i);
-    expect(logger).toHaveBeenCalledWith("Cloudflare anti-bot page detected");
+    expect(logger).toHaveBeenCalledWith(expect.stringContaining("Cloudflare challenge detected"));
   });
 
   test("passes through when title clean", async () => {
@@ -192,7 +192,7 @@ describe("ensureLoggedIn", () => {
       }),
     } as unknown as ChromeClient["Runtime"];
     await expect(ensureLoggedIn(runtime, logger, { appliedCookies: 2 })).resolves.toBeUndefined();
-    expect(logger).toHaveBeenCalledWith(expect.stringContaining("Login check passed"));
+    expect(logger).toHaveBeenCalledWith(expect.stringContaining("login check passed"));
   });
 
   test("throws with cookie guidance when cookies missing", async () => {

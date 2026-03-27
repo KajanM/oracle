@@ -331,8 +331,7 @@ async function openModelPickerTrusted(
     button: "left",
     clickCount: 1,
   });
-  const deadline = Date.now() + 750;
-  while (Date.now() < deadline) {
+  const isMenuOpen = async () => {
     const probe = await Runtime.evaluate({
       expression: `(() => {
         const btn = document.querySelector('${MODEL_BUTTON_SELECTOR}');
@@ -343,9 +342,34 @@ async function openModelPickerTrusted(
       })()`,
       returnByValue: true,
     });
-    if (probe?.result?.value === true) {
-      return true;
-    }
+    return probe?.result?.value === true;
+  };
+
+  // Wait for CDP click to take effect
+  const deadline = Date.now() + 750;
+  while (Date.now() < deadline) {
+    if (await isMenuOpen()) return true;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+
+  // Fallback: Radix UI may require PointerEvents that CDP mouse events don't trigger.
+  // Dispatch a full pointer event sequence directly on the button via DOM.
+  await Runtime.evaluate({
+    expression: `(() => {
+      const btn = document.querySelector('${MODEL_BUTTON_SELECTOR}');
+      if (!(btn instanceof HTMLElement)) return;
+      const common = { bubbles: true, cancelable: true, view: window };
+      for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+        const event = type.startsWith('pointer') && 'PointerEvent' in window
+          ? new PointerEvent(type, { ...common, pointerId: 1, pointerType: 'mouse' })
+          : new MouseEvent(type, common);
+        btn.dispatchEvent(event);
+      }
+    })()`,
+  });
+  const fallbackDeadline = Date.now() + 750;
+  while (Date.now() < fallbackDeadline) {
+    if (await isMenuOpen()) return true;
     await new Promise((r) => setTimeout(r, 50));
   }
   return false;
@@ -360,13 +384,16 @@ function buildModelStateProbeExpression(targetModel: string): string {
     };
     const target = normalizeText(${targetLiteral});
     const header = (document.querySelector('${MODEL_BUTTON_SELECTOR}')?.textContent ?? '').trim();
-    const footer = (document.querySelector('[data-testid=\"composer-footer-actions\"]')?.textContent ?? '').trim();
+    const footer = (document.querySelector('.__composer-pill-composite') || document.querySelector('[data-testid=\"composer-footer-actions\"]'))?.textContent?.trim() ?? '';
     const normalizedHeader = normalizeText(header);
     const normalizedFooter = normalizeText(footer);
     const wantsPro = target === 'pro';
-    const alreadySelected = wantsPro
-      ? normalizedFooter.includes('extended pro') || normalizedFooter === 'pro'
-      : Boolean(target && normalizedHeader.includes(target));
+    const wantsLatestModel = target === 'use latest model';
+    const alreadySelected = wantsLatestModel
+      ? true
+      : wantsPro
+        ? normalizedFooter.includes('extended pro') || normalizedFooter === 'pro'
+        : Boolean(target && normalizedHeader.includes(target));
     return { target, header, footer, alreadySelected };
   })()`;
 }
@@ -393,7 +420,9 @@ function buildTrustedModelProbeExpression(targetModel: string): string {
       return { menuOpen, buttonLabel, availableOptions: [] };
     }
     const normalizedTarget = normalizeText(PRIMARY_LABEL);
-    const simpleTarget = ['pro', 'thinking', 'auto', 'instant'].includes(normalizedTarget)
+    const simpleTarget = ['pro', 'thinking', 'auto', 'instant', 'use latest model'].includes(
+      normalizedTarget,
+    )
       ? normalizedTarget
       : null;
     const normalizedTokens = Array.from(new Set([normalizedTarget, ...LABEL_TOKENS]))
@@ -407,6 +436,8 @@ function buildTrustedModelProbeExpression(targetModel: string): string {
         if (text === simpleTarget) total += 2000;
         else if (text.startsWith(simpleTarget + ' ')) total += 1800;
         else if (text.includes(simpleTarget)) total += 900;
+        // "Use latest model" should match the Pro option in the picker
+        else if (simpleTarget === 'use latest model' && (text.startsWith('pro') || text.includes('research grade'))) total += 1800;
       }
       const exactMatch = TEST_IDS.find((id) => id && testid === id);
       if (exactMatch) total += 1500;
@@ -460,7 +491,8 @@ function buildTrustedModelProbeExpression(targetModel: string): string {
           text === simpleTarget ||
           text.startsWith(simpleTarget + ' ') ||
           text.includes(simpleTarget) ||
-          (simpleTarget === 'pro' && text.includes('research grade'));
+          ((simpleTarget === 'pro' || simpleTarget === 'use latest model') &&
+            text.includes('research grade'));
         if (!textLooksRight) continue;
         const clickable =
           node.closest('[role="menuitem"], [role="menuitemradio"], button, [data-testid*="model-switcher"]') ??
@@ -498,14 +530,16 @@ function buildButtonMatchProbeExpression(targetModel: string): string {
     const target = normalizeText(${primaryLabelLiteral});
     const label = (document.querySelector('${MODEL_BUTTON_SELECTOR}')?.textContent ?? '').trim();
     const normalized = normalizeText(label);
-    const footer = (document.querySelector('[data-testid="composer-footer-actions"]')?.textContent ?? '').trim();
+    const footer = (document.querySelector('.__composer-pill-composite') || document.querySelector('[data-testid="composer-footer-actions"]'))?.textContent?.trim() ?? '';
     const normalizedFooter = normalizeText(footer);
     const wantsPro = target === 'pro';
+    const wantsLatestModel = target === 'use latest model';
     return {
       label,
       footer,
-      matches: wantsPro
-        ? normalizedFooter.includes('extended pro') || normalizedFooter === 'pro'
+      matches: wantsPro || wantsLatestModel
+        ? normalizedFooter.includes('extended pro') || normalizedFooter === 'pro' ||
+          (wantsLatestModel && (normalized === 'chatgpt' || normalizedFooter.includes('pro')))
         : Boolean(target && normalized && normalized.includes(target)),
       menuOpen: Boolean(document.querySelector('[role="menu"] [data-testid^="model-switcher-"]')),
     };
@@ -1120,6 +1154,21 @@ function buildModelMatchersLiteral(targetModel: string): {
   push(`chatgpt ${dotless}`, labelTokens);
   push(`gpt ${base}`, labelTokens);
   push(`gpt ${dotless}`, labelTokens);
+  // Numeric variations (5.3 ↔ 53 ↔ gpt-5-3)
+  if (base.includes("5.3") || base.includes("5-3") || base.includes("53")) {
+    push("5.3", labelTokens);
+    push("gpt-5.3", labelTokens);
+    push("gpt5.3", labelTokens);
+    push("gpt-5-3", labelTokens);
+    push("gpt5-3", labelTokens);
+    push("gpt53", labelTokens);
+    push("chatgpt 5.3", labelTokens);
+    push("instant", labelTokens);
+    testIdTokens.add("model-switcher-gpt-5-3");
+    testIdTokens.add("gpt-5-3");
+    testIdTokens.add("gpt5-3");
+    testIdTokens.add("gpt53");
+  }
   // Numeric variations (5.4 ↔ 54 ↔ gpt-5-4)
   if (base.includes("5.4") || base.includes("5-4") || base.includes("54")) {
     push("5.4", labelTokens);
@@ -1129,7 +1178,14 @@ function buildModelMatchersLiteral(targetModel: string): {
     push("gpt5-4", labelTokens);
     push("gpt54", labelTokens);
     push("chatgpt 5.4", labelTokens);
-    if (!base.includes("pro")) {
+    // Thinking variant: explicit testid for "Thinking" picker option
+    if (base.includes("thinking")) {
+      push("thinking", labelTokens);
+      testIdTokens.add("model-switcher-gpt-5-4-thinking");
+      testIdTokens.add("gpt-5-4-thinking");
+      testIdTokens.add("gpt-5.4-thinking");
+    }
+    if (!base.includes("pro") && !base.includes("thinking")) {
       testIdTokens.add("model-switcher-gpt-5-4");
     }
     testIdTokens.add("gpt-5-4");

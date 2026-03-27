@@ -23,12 +23,12 @@ export function installJavaScriptDialogAutoDismissal(
   const handler = async (params: DialogEvent) => {
     const type = typeof params?.type === "string" ? params.type : "unknown";
     const message = typeof params?.message === "string" ? params.message : "";
-    logger(`[nav] dismissing JS dialog (${type})${message ? `: ${message.slice(0, 140)}` : ""}`);
+    logger(`[browser] [nav] dismissing JS dialog (${type})${message ? `: ${message.slice(0, 140)}` : ""}`);
     try {
       await pageAny.handleJavaScriptDialog?.({ accept: true, promptText: "" });
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
-      logger(`[nav] failed to dismiss JS dialog: ${msg}`);
+      logger(`[browser] [nav] failed to dismiss JS dialog: ${msg}`);
     }
   };
 
@@ -36,11 +36,12 @@ export function installJavaScriptDialogAutoDismissal(
   return () => {
     try {
       pageAny.off?.("javascriptDialogOpening", handler);
-    } catch {
+    } catch (err) {
+      logger(`[browser] [warn] installJavaScriptDialogAutoDismissal cleanup (off): ${err instanceof Error ? err.message : err}`);
       try {
         pageAny.removeListener?.("javascriptDialogOpening", handler);
-      } catch {
-        // ignore
+      } catch (err2) {
+        logger(`[browser] [warn] installJavaScriptDialogAutoDismissal cleanup (removeListener): ${err2 instanceof Error ? err2.message : err2}`);
       }
     }
   };
@@ -52,7 +53,7 @@ export async function navigateToChatGPT(
   url: string,
   logger: BrowserLogger,
 ) {
-  logger(`Navigating to ${url}`);
+  logger(`[browser] [nav] navigating to ${url}`);
   await Page.navigate({ url });
   await waitForDocumentReady(Runtime, 45_000);
 }
@@ -125,12 +126,16 @@ async function dismissBlockingUi(
       return { dismissed: false };
     })()`,
     returnByValue: true,
-  }).catch(() => null);
+  }).catch((err) => {
+    logger(`[browser] [warn] dismissBlockingUi evaluate: ${err instanceof Error ? err.message : err}`);
+    return null;
+  });
   const value = outcome?.result?.value as { dismissed?: boolean; action?: string } | undefined;
   if (value?.dismissed) {
-    logger(`[nav] dismissed blocking UI (${value.action ?? "unknown"})`);
+    logger(`[browser] [nav] dismissBlockingUi: dismissed blocking UI (${value.action ?? "unknown"})`);
     return true;
   }
+  logger(`[browser] [nav] dismissBlockingUi: no blocking UI found`);
   return false;
 }
 
@@ -147,7 +152,10 @@ export async function navigateToPromptReadyWithFallback(
 
   await navigate(Page, Runtime, url, logger);
   await ensureBlocked(Runtime, headless, logger);
-  await dismissBlockingUi(Runtime, logger).catch(() => false);
+  await dismissBlockingUi(Runtime, logger).catch((err) => {
+    logger(`[browser] [warn] navigateToPromptReadyWithFallback dismissBlockingUi: ${err instanceof Error ? err.message : err}`);
+    return false;
+  });
   try {
     await ensureReady(Runtime, timeoutMs, logger);
     return { usedFallback: false };
@@ -161,7 +169,10 @@ export async function navigateToPromptReadyWithFallback(
     );
     await navigate(Page, Runtime, fallbackUrl, logger);
     await ensureBlocked(Runtime, headless, logger);
-    await dismissBlockingUi(Runtime, logger).catch(() => false);
+    await dismissBlockingUi(Runtime, logger).catch((err) => {
+      logger(`[browser] [warn] navigateToPromptReadyWithFallback dismissBlockingUi: ${err instanceof Error ? err.message : err}`);
+      return false;
+    });
     await ensureReady(Runtime, fallbackTimeout, logger);
     return { usedFallback: true };
   }
@@ -176,7 +187,7 @@ export async function ensureNotBlocked(
     const message = headless
       ? "Cloudflare challenge detected in headless mode. Re-run with --headful so you can solve the challenge."
       : "Cloudflare challenge detected. Complete the “Just a moment…” check in the open browser, then rerun.";
-    logger("Cloudflare anti-bot page detected");
+    logger("[browser] [nav] Cloudflare challenge detected");
     throw new BrowserAutomationError(message, { stage: "cloudflare-challenge", headless });
   }
 }
@@ -198,7 +209,7 @@ export async function ensureLoggedIn(
   const probe = normalizeLoginProbe(outcome.result?.value);
   if (probe.ok) {
     logger(
-      `Login check passed (status=${probe.status}, domLoginCta=${Boolean(probe.domLoginCta)})`,
+      `[browser] [nav] login check passed (status=${probe.status}, domLoginCta=${Boolean(probe.domLoginCta)})`,
     );
     return;
   }
@@ -215,18 +226,18 @@ export async function ensureLoggedIn(
     });
     const retryProbe = normalizeLoginProbe(retryOutcome.result?.value);
     if (retryProbe.ok) {
-      logger("Login restored via Welcome back account picker");
+      logger("[browser] [nav] login restored via Welcome back account picker");
       return;
     }
     logger(
-      `Login retry after Welcome back failed (status=${retryProbe.status}, domLoginCta=${Boolean(
+      `[browser] [nav] login retry after Welcome back failed (status=${retryProbe.status}, domLoginCta=${Boolean(
         retryProbe.domLoginCta,
       )})`,
     );
   }
 
   logger(
-    `Login probe failed (status=${probe.status}, domLoginCta=${Boolean(probe.domLoginCta)}, onAuthPage=${Boolean(
+    `[browser] [nav] login probe failed (status=${probe.status}, domLoginCta=${Boolean(probe.domLoginCta)}, onAuthPage=${Boolean(
       probe.onAuthPage,
     )}, url=${probe.pageUrl ?? "n/a"}, error=${probe.error ?? "none"})`,
   );
@@ -308,24 +319,24 @@ async function attemptWelcomeBackLogin(
         details.exception.description) ||
       details.text ||
       "unknown error";
-    logger(`Welcome back auto-select probe failed: ${description}`);
+    logger(`[browser] [nav] Welcome back auto-select probe failed: ${description}`);
   }
   const result = outcome.result?.value as
     | { clicked?: boolean; reason?: string; label?: string }
     | undefined;
   if (!result) {
-    logger("Welcome back auto-select probe returned no result.");
+    logger("[browser] [nav] Welcome back auto-select probe returned no result.");
     return false;
   }
   if (result?.clicked) {
-    logger(`Welcome back modal detected; selected account ${result.label ?? "(unknown)"}`);
+    logger(`[browser] [nav] Welcome back modal detected; selected account ${result.label ?? "(unknown)"}`);
     return true;
   }
   if (result?.reason && result.reason !== "timeout") {
-    logger(`Welcome back modal present but auto-select failed (${result.reason}).`);
+    logger(`[browser] [nav] Welcome back modal present but auto-select failed (${result.reason}).`);
   }
   if (result?.reason === "timeout") {
-    logger("Welcome back modal not detected after login probe failure.");
+    logger("[browser] [nav] Welcome back modal not detected after login probe failure.");
   }
   return false;
 }
@@ -338,9 +349,9 @@ export async function ensurePromptReady(
   const ready = await waitForPrompt(Runtime, timeoutMs);
   if (!ready) {
     const authUrl = await currentUrl(Runtime);
-    if (authUrl && isAuthLoginUrl(authUrl)) {
+    if (authUrl && isAuthLoginUrl(authUrl, logger)) {
       // Learned: auth.openai.com/login can appear after cookies are copied; allow manual login window.
-      logger("Auth login page detected; waiting for manual login to complete...");
+      logger("[browser] [nav] Auth login page detected; waiting for manual login to complete...");
       const extended = Math.min(Math.max(timeoutMs, 60_000), 20 * 60_000);
       const loggedIn = await waitForPrompt(Runtime, extended);
       if (loggedIn) {
@@ -375,14 +386,17 @@ async function currentUrl(Runtime: ChromeClient["Runtime"]): Promise<string | nu
   return typeof result?.value === "string" ? result.value : null;
 }
 
-function isAuthLoginUrl(url: string): boolean {
+function isAuthLoginUrl(url: string, logger?: BrowserLogger): boolean {
   try {
     const parsed = new URL(url);
     if (parsed.hostname.includes("auth.openai.com")) {
       return true;
     }
     return /^\/log-?in/i.test(parsed.pathname);
-  } catch {
+  } catch (err) {
+    if (logger) {
+      logger(`[browser] [warn] isAuthLoginUrl: ${err instanceof Error ? err.message : err}`);
+    }
     return false;
   }
 }

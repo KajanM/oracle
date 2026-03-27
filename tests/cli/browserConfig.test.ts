@@ -15,7 +15,7 @@ describe("buildBrowserConfig", () => {
       headless: undefined,
       keepBrowser: undefined,
       hideWindow: undefined,
-      desiredModel: "Pro",
+      desiredModel: "Use latest model",
       debug: undefined,
       allowCookieErrors: true,
     });
@@ -76,7 +76,7 @@ describe("buildBrowserConfig", () => {
       model: "gpt-5.2-pro",
       browserModelLabel: "Instant",
     });
-    expect(config.desiredModel).toBe("Pro");
+    expect(config.desiredModel).toBe("Use latest model");
   });
 
   test("falls back to canonical label when override matches base model", async () => {
@@ -200,11 +200,11 @@ describe("buildBrowserConfig", () => {
 
 describe("resolveBrowserModelLabel", () => {
   test("returns canonical ChatGPT label when CLI value matches API model", () => {
-    expect(resolveBrowserModelLabel("gpt-5.4-pro", "gpt-5.4-pro")).toBe("Pro");
+    expect(resolveBrowserModelLabel("gpt-5.4-pro", "gpt-5.4-pro")).toBe("Use latest model");
     expect(resolveBrowserModelLabel("gpt-5.4", "gpt-5.4")).toBe("Thinking");
-    expect(resolveBrowserModelLabel("gpt-5-pro", "gpt-5-pro")).toBe("Pro");
-    expect(resolveBrowserModelLabel("gpt-5.2-pro", "gpt-5.2-pro")).toBe("Pro");
-    expect(resolveBrowserModelLabel("gpt-5.1-pro", "gpt-5.1-pro")).toBe("Pro");
+    expect(resolveBrowserModelLabel("gpt-5-pro", "gpt-5-pro")).toBe("Use latest model");
+    expect(resolveBrowserModelLabel("gpt-5.2-pro", "gpt-5.2-pro")).toBe("Use latest model");
+    expect(resolveBrowserModelLabel("gpt-5.1-pro", "gpt-5.1-pro")).toBe("Use latest model");
     expect(resolveBrowserModelLabel("GPT-5.1", "gpt-5.1")).toBe("Auto");
   });
 
@@ -217,7 +217,7 @@ describe("resolveBrowserModelLabel", () => {
   });
 
   test("supports undefined or whitespace-only input", () => {
-    expect(resolveBrowserModelLabel(undefined, "gpt-5.2-pro")).toBe("Pro");
+    expect(resolveBrowserModelLabel(undefined, "gpt-5.2-pro")).toBe("Use latest model");
     expect(resolveBrowserModelLabel("   ", "gpt-5.1")).toBe("Auto");
   });
 

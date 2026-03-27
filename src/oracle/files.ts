@@ -152,10 +152,15 @@ async function partitionFileInputs(
     literalDirectories: [],
   };
 
+  const homeDir = process.env.HOME || process.env.USERPROFILE || "";
   for (const entry of rawPaths) {
-    const raw = entry?.trim();
+    let raw = entry?.trim();
     if (!raw) {
       continue;
+    }
+    // Expand leading ~ to the user's home directory (shell-style tilde expansion)
+    if (homeDir && (raw === "~" || raw.startsWith("~/"))) {
+      raw = homeDir + raw.slice(1);
     }
     if (raw.startsWith("!")) {
       const normalized = normalizeGlob(raw.slice(1), cwd);

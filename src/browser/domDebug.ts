@@ -40,7 +40,7 @@ export async function logDomFailure(
       logger.sessionLog(entry);
     }
     await logConversationSnapshot(Runtime, logger);
-  } catch {
-    // ignore snapshot failures
+  } catch (err) {
+    logger(`[browser] [warn] logDomFailure snapshot: ${err instanceof Error ? err.message : err}`);
   }
 }

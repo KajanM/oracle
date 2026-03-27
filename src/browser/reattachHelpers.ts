@@ -202,6 +202,7 @@ export async function openConversationFromSidebarWithRetry(
   Runtime: ChromeClient["Runtime"],
   options: { conversationId?: string; preferProjects?: boolean; promptPreview?: string },
   timeoutMs: number,
+  logger?: BrowserLogger,
 ): Promise<boolean> {
   const start = Date.now();
   let attempt = 0;
@@ -210,7 +211,7 @@ export async function openConversationFromSidebarWithRetry(
     const opened = await openConversationFromSidebar(Runtime, options, attempt);
     if (opened) {
       if (options.promptPreview) {
-        const matched = await waitForPromptPreview(Runtime, options.promptPreview, 10_000);
+        const matched = await waitForPromptPreview(Runtime, options.promptPreview, 10_000, logger);
         if (matched) {
           return true;
         }
@@ -228,6 +229,7 @@ export async function waitForPromptPreview(
   Runtime: ChromeClient["Runtime"],
   promptPreview: string,
   timeoutMs: number,
+  logger?: BrowserLogger,
 ): Promise<boolean> {
   const needleFull = promptPreview.trim().toLowerCase().slice(0, 120);
   const needleShort = needleFull.replace(/\\s*\\d{4,}\\s*$/, "").trim();
@@ -267,8 +269,10 @@ export async function waitForPromptPreview(
       if (result?.value === true) {
         return true;
       }
-    } catch {
-      // ignore
+    } catch (err) {
+      if (logger) {
+        logger(`[browser] [warn] waitForPromptPreview evaluate: ${err instanceof Error ? err.message : err}`);
+      }
     }
     await delay(300);
   }

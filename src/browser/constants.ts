@@ -10,38 +10,39 @@ export const COOKIE_URLS = [
 ];
 
 export const INPUT_SELECTORS = [
-  'textarea[data-id="prompt-textarea"]',
-  'textarea[placeholder*="Send a message"]',
-  'textarea[aria-label="Message ChatGPT"]',
-  "textarea:not([disabled])",
-  'textarea[name="prompt-textarea"]',
   "#prompt-textarea",
   ".ProseMirror",
   '[contenteditable="true"][data-virtualkeyboard="true"]',
+  'div#prompt-textarea[contenteditable="true"]',
+  '[role="textbox"][aria-label="Chat with ChatGPT"]',
+  'textarea[data-id="prompt-textarea"]',
+  "textarea:not([disabled])",
 ];
 
 export const ANSWER_SELECTORS = [
-  'article[data-testid^="conversation-turn"][data-message-author-role="assistant"]',
-  'article[data-testid^="conversation-turn"][data-turn="assistant"]',
-  'article[data-testid^="conversation-turn"] [data-message-author-role="assistant"]',
-  'article[data-testid^="conversation-turn"] [data-turn="assistant"]',
-  'article[data-testid^="conversation-turn"] .markdown',
+  'section[data-testid^="conversation-turn"][data-turn="assistant"]',
+  'section[data-testid^="conversation-turn"] [data-message-author-role="assistant"]',
+  'section[data-testid^="conversation-turn"] .markdown',
   '[data-message-author-role="assistant"] .markdown',
   '[data-turn="assistant"] .markdown',
   '[data-message-author-role="assistant"]',
   '[data-turn="assistant"]',
+  'article[data-testid^="conversation-turn"][data-message-author-role="assistant"]',
+  'article[data-testid^="conversation-turn"][data-turn="assistant"]',
+  'article[data-testid^="conversation-turn"] [data-message-author-role="assistant"]',
+  'article[data-testid^="conversation-turn"] .markdown',
 ];
 
 export const CONVERSATION_TURN_SELECTOR =
-  'article[data-testid^="conversation-turn"], div[data-testid^="conversation-turn"], section[data-testid^="conversation-turn"], ' +
-  "article[data-message-author-role], div[data-message-author-role], section[data-message-author-role], " +
-  "article[data-turn], div[data-turn], section[data-turn]";
+  'section[data-testid^="conversation-turn"], article[data-testid^="conversation-turn"], div[data-testid^="conversation-turn"], ' +
+  "section[data-message-author-role], article[data-message-author-role], div[data-message-author-role], " +
+  "section[data-turn], article[data-turn], div[data-turn]";
 export const ASSISTANT_ROLE_SELECTOR =
   '[data-message-author-role="assistant"], [data-turn="assistant"]';
 export const CLOUDFLARE_SCRIPT_SELECTOR = 'script[src*="/challenge-platform/"]';
 export const CLOUDFLARE_TITLE = "just a moment";
 export const PROMPT_PRIMARY_SELECTOR = "#prompt-textarea";
-export const PROMPT_FALLBACK_SELECTOR = 'textarea[name="prompt-textarea"]';
+export const PROMPT_FALLBACK_SELECTOR = '.ProseMirror';
 export const FILE_INPUT_SELECTORS = [
   'form input[type="file"]:not([accept])',
   'input[type="file"][multiple]:not([accept])',
@@ -76,10 +77,10 @@ export const UPLOAD_STATUS_SELECTORS = [
 export const STOP_BUTTON_SELECTOR = '[data-testid="stop-button"]';
 export const SEND_BUTTON_SELECTORS = [
   'button[data-testid="send-button"]',
+  'button[aria-label*="Send"]',
+  'button.composer-submit-btn',
   'button[data-testid*="composer-send"]',
   'form button[type="submit"]',
-  'button[type="submit"][data-testid*="send"]',
-  'button[aria-label*="Send"]',
 ];
 export const SEND_BUTTON_SELECTOR = SEND_BUTTON_SELECTORS[0];
 export const MODEL_BUTTON_SELECTOR = '[data-testid="model-switcher-dropdown-button"]';

@@ -137,7 +137,11 @@ export async function submitPrompt(
       expression: `(() => {
         const fallback = document.querySelector(${fallbackSelectorLiteral});
         if (fallback) {
-          fallback.value = ${encodedPrompt};
+          if (fallback instanceof HTMLTextAreaElement) {
+            fallback.value = ${encodedPrompt};
+          } else {
+            fallback.textContent = ${encodedPrompt};
+          }
           fallback.dispatchEvent(new InputEvent('input', { bubbles: true, data: ${encodedPrompt}, inputType: 'insertFromPaste' }));
           fallback.dispatchEvent(new Event('change', { bubbles: true }));
         }
@@ -201,8 +205,31 @@ export async function submitPrompt(
     );
   }
 
+  const hasExpectedAttachments = Array.isArray(deps?.attachmentNames) && deps.attachmentNames.length > 0;
   const clicked = await attemptSendButton(runtime, logger, deps?.attachmentNames);
+  logger(`[browser] [submit] promptLength=${promptLength}, method=${clicked ? "button" : "enter"}`);
   if (!clicked) {
+    // Before falling back to Enter key, verify attachments are present if expected.
+    // Learned: with ChatGPT UI lag, attachments may not be ready when attemptSendButton times out;
+    // submitting via Enter without the attachment wastes the oracle turn.
+    if (hasExpectedAttachments) {
+      const attachmentsReady = await runtime.evaluate({
+        expression: buildAttachmentReadyExpression(deps.attachmentNames!),
+        returnByValue: true,
+      });
+      if (!attachmentsReady?.result?.value) {
+        logger(`[browser] [submit] attachments not ready, aborting submit to avoid sending without attachment`);
+        throw new BrowserAutomationError(
+          "Attachments not present in composer before submit — aborting to avoid sending prompt without attachment.",
+          {
+            stage: "submit-prompt",
+            code: "attachments-not-ready",
+            expectedAttachments: deps.attachmentNames,
+          },
+        );
+      }
+      logger(`[browser] [submit] attachments verified present before Enter key fallback`);
+    }
     await input.dispatchKeyEvent({
       type: "keyDown",
       ...ENTER_KEY_EVENT,
@@ -220,13 +247,15 @@ export async function submitPrompt(
 
   const commitTimeoutMs = Math.max(60_000, deps.inputTimeoutMs ?? 0);
   // Learned: the send button can succeed but the turn doesn't appear immediately; verify commit via turns/stop button.
-  return await verifyPromptCommitted(
+  const verifyResult = await verifyPromptCommitted(
     runtime,
     prompt,
     commitTimeoutMs,
     logger,
     deps.baselineTurns ?? undefined,
   );
+  logger(`[browser] [submit] verifyPromptCommitted succeeded`);
+  return verifyResult;
 }
 
 export async function clearPromptComposer(Runtime: ChromeClient["Runtime"], logger: BrowserLogger) {
@@ -311,23 +340,30 @@ function buildAttachmentReadyExpression(attachmentNames: string[]): string {
   return `(() => {
     const names = ${namesLiteral};
     const composer =
-      document.querySelector('[data-testid*="composer"]') ||
       document.querySelector('form') ||
+      document.querySelector('div[data-testid*="composer"]') ||
       document.body ||
       document;
-    const match = (node, name) => (node?.textContent || '').toLowerCase().includes(name);
+    // Check textContent, aria-label, and title for the filename.
+    // ChatGPT now puts filenames in aria-label (e.g. "Remove file 1: filename.txt").
+    const match = (node, name) => {
+      const text = (node?.textContent || '').toLowerCase();
+      const aria = (node?.getAttribute?.('aria-label') || '').toLowerCase();
+      const title = (node?.getAttribute?.('title') || '').toLowerCase();
+      return text.includes(name) || aria.includes(name) || title.includes(name);
+    };
 
-    // Restrict to attachment affordances; never scan generic div/span nodes (prompt text can contain the file name).
     const attachmentSelectors = [
+      '[aria-label*="Remove file"]',
+      'button[aria-label*="Remove file"]',
       '[data-testid*="chip"]',
       '[data-testid*="attachment"]',
       '[data-testid*="upload"]',
-      '[aria-label="Remove file"]',
-      'button[aria-label="Remove file"]',
     ];
 
+    const chipNodes = Array.from(composer.querySelectorAll(attachmentSelectors.join(',')));
     const chipsReady = names.every((name) =>
-      Array.from(composer.querySelectorAll(attachmentSelectors.join(','))).some((node) => match(node, name)),
+      chipNodes.some((node) => match(node, name)),
     );
     const inputsReady = names.every((name) =>
       Array.from(composer.querySelectorAll('input[type="file"]')).some((el) =>
@@ -337,7 +373,12 @@ function buildAttachmentReadyExpression(attachmentNames: string[]): string {
       ),
     );
 
-    return chipsReady || inputsReady;
+    // Fallback: if we can't match filenames but "Remove file" buttons exist in the composer,
+    // the attachments are present.
+    const removeFileButtons = composer.querySelectorAll('[aria-label*="Remove file"]');
+    const removeCountReady = removeFileButtons.length >= names.length;
+
+    return chipsReady || inputsReady || removeCountReady;
   })()`;
 }
 
@@ -347,7 +388,7 @@ export function buildAttachmentReadyExpressionForTest(attachmentNames: string[])
 
 async function attemptSendButton(
   Runtime: ChromeClient["Runtime"],
-  _logger?: BrowserLogger,
+  logger?: BrowserLogger,
   attachmentNames?: string[],
 ): Promise<boolean> {
   const script = `(() => {
@@ -375,16 +416,23 @@ async function attemptSendButton(
     return 'clicked';
   })()`;
 
-  const deadline = Date.now() + 8_000;
+  const needAttachment = Array.isArray(attachmentNames) && attachmentNames.length > 0;
+  // Learned: ChatGPT UI lag can delay attachment rendering well beyond 8s; use a longer budget when attachments are expected.
+  const deadline = Date.now() + (needAttachment ? 30_000 : 8_000);
+  let lastAttachmentLog = 0;
   while (Date.now() < deadline) {
-    const needAttachment = Array.isArray(attachmentNames) && attachmentNames.length > 0;
     if (needAttachment) {
       const ready = await Runtime.evaluate({
         expression: buildAttachmentReadyExpression(attachmentNames),
         returnByValue: true,
       });
       if (!ready?.result?.value) {
-        await delay(150);
+        const now = Date.now();
+        if (now - lastAttachmentLog > 5_000) {
+          lastAttachmentLog = now;
+          logger?.(`[browser] [submit] waiting for attachments to appear in composer...`);
+        }
+        await delay(250);
         continue;
       }
     }
@@ -429,8 +477,8 @@ async function verifyPromptCommitted(
       if (Number.isFinite(raw)) {
         baseline = Math.max(0, Math.floor(raw));
       }
-    } catch {
-      // ignore; baseline stays unknown
+    } catch (err) {
+      logger?.(`[browser] [warn] verifyPromptCommitted baseline discovery: ${err instanceof Error ? err.message : err}`);
     }
   }
   const baselineLiteral = baseline ?? -1;
@@ -540,6 +588,7 @@ async function verifyPromptCommitted(
     }
     await delay(100);
   }
+  logger?.(`[browser] [submit] verifyPromptCommitted failed`);
   if (logger) {
     logger(
       `Prompt commit check failed; latest state: ${await Runtime.evaluate({

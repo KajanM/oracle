@@ -21,6 +21,7 @@ export async function launchChrome(
   const debugBindAddress = connectHost && connectHost !== "127.0.0.1" ? "0.0.0.0" : connectHost;
   const debugPort = config.debugPort ?? parseDebugPortEnv();
   const chromeFlags = buildChromeFlags(config.headless ?? false, debugBindAddress);
+  logger(`[browser] [chrome] launching with flags: ${chromeFlags.join(" ")}`);
   const usePatchedLauncher = Boolean(connectHost && connectHost !== "127.0.0.1");
   const launcher = usePatchedLauncher
     ? await launchWithCustomHost({
@@ -86,8 +87,10 @@ export function registerTerminationHooks(
       } else {
         try {
           await chrome.kill();
-        } catch {
-          // ignore kill failures
+        } catch (err) {
+          logger(
+            `[browser] [warn] chrome.kill() in signal handler: ${err instanceof Error ? err.message : err}`,
+          );
         }
         if (opts?.preserveUserDataDir) {
           // Preserve the profile directory (manual login), but clear reattach hints so we don't
@@ -383,8 +386,8 @@ function resolveRemoteDebugHost(): string | null {
         return match[1];
       }
     }
-  } catch {
-    // ignore; fall back to localhost
+  } catch (err) {
+    /* resolv.conf unavailable, default to localhost */
   }
   return null;
 }
