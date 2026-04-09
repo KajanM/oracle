@@ -21,6 +21,7 @@ export {
 export {
   waitForAssistantResponse,
   readAssistantSnapshot,
+  pollAssistantCompletion,
   captureAssistantMarkdown,
   buildAssistantExtractorForTest,
   buildConversationDebugExpressionForTest,

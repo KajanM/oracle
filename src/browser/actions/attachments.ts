@@ -1896,14 +1896,23 @@ export async function waitForUserTurnAttachments(
       '[data-testid*="attachment"]',
       '[data-testid*="upload"]',
       '[data-testid*="chip"]',
+      '[data-testid*="file"]',
       '[aria-label*="file"]',
       '[aria-label*="attachment"]',
+      '[aria-label*="document"]',
       '[title*="file"]',
       '[title*="attachment"]',
+      'img[alt]',
+      'a[href*="file"]',
+      '[class*="file"]',
+      '[class*="attachment"]',
     ];
     const attachmentUiCount = lastUser.querySelectorAll(attachmentSelectors.join(',')).length;
+    // Also check for Document/file cards rendered as plain divs with specific text patterns
+    const allDivText = Array.from(lastUser.querySelectorAll('div,span,p')).map(el => (el.textContent || '').toLowerCase());
+    const hasDocumentCard = allDivText.some(t => t === 'document' || t === 'image' || t === 'pdf' || t === 'spreadsheet');
     const hasAttachmentUi =
-      attachmentUiCount > 0 || attrs.some((attr) => attr.includes('file') || attr.includes('attachment'));
+      attachmentUiCount > 0 || hasDocumentCard || attrs.some((attr) => attr.includes('file') || attr.includes('attachment') || attr.includes('document'));
     const countRegex = /(?:^|\\b)(\\d+)\\s+(?:files?|attachments?)\\b/;
     const fileCountNodes = Array.from(lastUser.querySelectorAll('button,span,div,[aria-label],[title]'));
     let fileCount = 0;

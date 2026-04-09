@@ -1,5 +1,4 @@
-import { COPY_BUTTON_SELECTOR, STOP_BUTTON_SELECTOR } from "../../constants.js";
-import { buildClickDispatcher } from "../../actions/domEvents.js";
+import { COMPOSER_SUBMIT_BUTTON_SELECTOR, COPY_BUTTON_SELECTOR, STOP_BUTTON_SELECTOR } from "../../constants.js";
 import type { BrowserLogger, ChromeClient } from "../../types.js";
 import { ChatgptDomSession } from "../chatgptDomSession.js";
 
@@ -79,7 +78,19 @@ export class AssistantSurface {
           return null;
         }
         const hasCopyButton = Boolean(node.querySelector(${JSON.stringify(COPY_BUTTON_SELECTOR)}));
-        const stopVisible = Boolean(document.querySelector(${JSON.stringify(STOP_BUTTON_SELECTOR)}));
+        let stopVisible = Boolean(document.querySelector(${JSON.stringify(STOP_BUTTON_SELECTOR)}));
+        // Composer-ready override: if the composer button has transitioned away
+        // from "Stop streaming", generation is done even if a stale stop-button
+        // element lingers in the DOM. Keeps this consistent with readAssistantGenerationUiState().
+        if (stopVisible) {
+          const composerBtn = document.querySelector(${JSON.stringify(COMPOSER_SUBMIT_BUTTON_SELECTOR)});
+          if (composerBtn) {
+            const label = (composerBtn.getAttribute('aria-label') || '').toLowerCase();
+            if (!label.includes('stop')) {
+              stopVisible = false;
+            }
+          }
+        }
         return {
           oracleId: node.getAttribute('data-oracle-id') || undefined,
           text: (node.textContent || '').replace(/\\s+/g, ' ').trim(),
@@ -109,38 +120,9 @@ export class AssistantSurface {
   }
 
   async copyMarkdown(): Promise<string | null> {
-    return this.session.withRepair("assistant", async () => {
-      const copyButton = await this.session.resolve("assistant.copyButton", { refresh: true });
-      const snapshot = await this.readSnapshot();
-      if (!copyButton.ok || !copyButton.oracleId) {
-        return snapshot.text || null;
-      }
-
-      const result = await this.runtime.evaluate({
-        expression: `(async () => {
-          ${buildClickDispatcher("dispatchOracleCopyClick")}
-          const button = document.querySelector(${oracleSelector(copyButton.oracleId)});
-          if (!(button instanceof HTMLElement)) {
-            return null;
-          }
-          dispatchOracleCopyClick(button);
-          button.click();
-          if (navigator.clipboard && typeof navigator.clipboard.readText === 'function') {
-            await new Promise((resolve) => setTimeout(resolve, 150));
-            try {
-              const text = await navigator.clipboard.readText();
-              return text || null;
-            } catch {
-              return null;
-            }
-          }
-          return null;
-        })()`,
-        returnByValue: true,
-        awaitPromise: true,
-      });
-
-      return (result.result?.value as string | null | undefined) ?? snapshot.text ?? null;
-    });
+    // Do NOT use navigator.clipboard.readText() — it triggers a browser permission dialog
+    // that blocks automation. Fall back to reading the snapshot text directly.
+    const snapshot = await this.readSnapshot();
+    return snapshot.text || null;
   }
 }

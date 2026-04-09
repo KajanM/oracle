@@ -75,6 +75,10 @@ export const UPLOAD_STATUS_SELECTORS = [
 ];
 
 export const STOP_BUTTON_SELECTOR = '[data-testid="stop-button"]';
+// When the stop button disappears, the composer submit area shows a voice or send button.
+// Checking the composer button's aria-label is more reliable than just checking for the
+// stop button's DOM presence, which can persist in the DOM even when not visually active.
+export const COMPOSER_SUBMIT_BUTTON_SELECTOR = '#composer-submit-button';
 export const SEND_BUTTON_SELECTORS = [
   'button[data-testid="send-button"]',
   'button[aria-label*="Send"]',

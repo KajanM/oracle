@@ -1,3 +1,4 @@
+import CDP from "chrome-remote-interface";
 import { mkdtemp, rm, mkdir } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
@@ -38,6 +39,7 @@ import {
   waitForAttachmentCompletion,
   waitForUserTurnAttachments,
   readAssistantSnapshot,
+  pollAssistantCompletion,
 } from "./pageActions.js";
 import { INPUT_SELECTORS } from "./constants.js";
 import { uploadAttachmentViaDataTransfer } from "./actions/remoteFileTransfer.js";
@@ -621,9 +623,14 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
             logger,
           );
           if (!verified) {
-            throw new Error("Sent user message did not expose attachment UI after upload.");
+            // Prompt was already submitted and committed — downgrade to warning instead of
+            // aborting the session. ChatGPT's post-submit attachment rendering changes frequently.
+            logger(
+              "[browser] [warn] Could not verify attachment UI on sent user message — proceeding anyway since prompt was committed.",
+            );
+          } else {
+            logger("Verified attachments present on sent user message");
           }
-          logger("Verified attachments present on sent user message");
         }
       }
       // Reattach needs a /c/ URL; ChatGPT can update it late, so poll in the background.
@@ -797,6 +804,48 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
             { stage: "assistant-timeout", runtime },
             error,
           );
+        }
+      } else if (connectionClosedUnexpectedly) {
+        // CDP WebSocket disconnected but Chrome may still be alive.
+        // Attempt to reconnect and capture the assistant response.
+        // On success, return IMMEDIATELY — the old Runtime/Page/Input handles
+        // are dead, so post-processing (markdown capture, sanity checks) would fail.
+        logger(`[browser] [recovery] CDP disconnected during assistant response — attempting reconnection to port=${chrome.port}`);
+        const recoveryRemainingMs = Math.max(0, config.timeoutMs - (Date.now() - waitStartMs));
+        const recovered = await recoverAssistantResponseViaCdpReconnect(
+          chrome.port,
+          chromeHost,
+          isolatedTargetId,
+          lastUrl ?? null,
+          baselineTurns ?? undefined,
+          logger,
+          recoveryRemainingMs,
+        ).catch((reconnectError) => {
+          logger(`[browser] [recovery] reconnection failed: ${reconnectError instanceof Error ? reconnectError.message : reconnectError}`);
+          return null;
+        });
+        if (recovered) {
+          logger(`[browser] [recovery] recovered ${recovered.text.length} chars via CDP reconnection — returning immediately`);
+          stopThinkingMonitor?.();
+          runStatus = "complete";
+          const durationMs = Date.now() - startedAt;
+          return {
+            answerText: recovered.text,
+            answerMarkdown: recovered.text,
+            answerHtml: recovered.html ?? undefined,
+            tookMs: durationMs,
+            answerTokens: estimateTokenCount(recovered.text),
+            answerChars: recovered.text.length,
+            chromePid: chrome.pid,
+            chromePort: chrome.port,
+            chromeHost,
+            userDataDir,
+            chromeTargetId: lastTargetId,
+            tabUrl: lastUrl,
+            controllerPid: process.pid,
+          };
+        } else {
+          throw error;
         }
       } else {
         throw error;
@@ -1054,8 +1103,14 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
     removeDialogHandler?.();
     removeTerminationHooks?.();
     const keepBrowserOpen = effectiveKeepBrowser || preserveBrowserOnError;
+    // Kill Chrome unless the user asked to keep it open. When the CDP connection
+    // dropped unexpectedly but recovery succeeded (runStatus === "complete"),
+    // Chrome is still alive (recovery proved it) and must be cleaned up —
+    // otherwise an empty about:blank Chrome window is left on screen.
+    const recoveredSuccessfully = connectionClosedUnexpectedly && runStatus === "complete";
+    const shouldKillChrome = !connectionClosedUnexpectedly || recoveredSuccessfully;
       if (!keepBrowserOpen) {
-      if (!connectionClosedUnexpectedly) {
+      if (shouldKillChrome) {
         try {
           await chrome.kill();
         } catch (err) {
@@ -1080,7 +1135,7 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
       } else {
         await rm(userDataDir, { recursive: true, force: true }).catch(() => undefined);
       }
-      if (!connectionClosedUnexpectedly) {
+      if (shouldKillChrome) {
         const totalSeconds = (Date.now() - startedAt) / 1000;
         logger(`[browser] [phase] cleanup — ${Date.now() - cleanupStartMs}ms`);
         logger(`[browser] [phase] total — ${Math.round(totalSeconds * 1000)}ms status=${runStatus}`);
@@ -2258,4 +2313,186 @@ function buildThinkingStatusExpression(): string {
     }
     return null;
   })()`;
+}
+
+/**
+ * Reconnect to a Chrome tab after CDP disconnect and capture the assistant response.
+ * Chrome may still be alive with a completed response even though the WebSocket dropped.
+ * This tries: (1) reconnect to the specific tab target, (2) fall back to finding the
+ * ChatGPT conversation tab, (3) read the assistant snapshot.
+ */
+async function recoverAssistantResponseViaCdpReconnect(
+  port: number,
+  chromeHost: string,
+  isolatedTargetId: string | null,
+  lastKnownUrl: string | null,
+  minTurnIndex: number | undefined,
+  logger: BrowserLogger,
+  remainingTimeoutMs?: number,
+): Promise<{ text: string; html?: string; meta: { turnId?: string | null; messageId?: string | null } } | null> {
+  const effectiveHost = chromeHost || "127.0.0.1";
+
+  // Step 1: Verify Chrome is still reachable
+  logger(`[browser] [recovery] checking Chrome health at ${effectiveHost}:${port}`);
+  let targets: Array<{ id: string; type: string; url: string }>;
+  try {
+    targets = await CDP.List({ host: effectiveHost, port }) as Array<{ id: string; type: string; url: string }>;
+    logger(`[browser] [recovery] Chrome alive — ${targets.length} targets found`);
+  } catch (err) {
+    logger(`[browser] [recovery] Chrome unreachable: ${err instanceof Error ? err.message : err}`);
+    return null;
+  }
+
+  // Step 2: Find the right target to reconnect to.
+  // Priority: (1) original target ID, (2) exact URL match, (3) conversation ID match.
+  // Never fall back to "first chatgpt.com/c/ page" — that can pick the wrong tab
+  // when multiple oracle sessions have concurrent Chrome instances.
+  let targetId: string | undefined;
+  if (isolatedTargetId) {
+    const found = targets.find((t) => t.id === isolatedTargetId);
+    if (found) {
+      logger(`[browser] [recovery] found original isolated target ${isolatedTargetId} — url=${found.url.slice(0, 80)}`);
+      targetId = isolatedTargetId;
+    } else {
+      logger(`[browser] [recovery] original target ${isolatedTargetId} not found — trying URL match`);
+    }
+  }
+  if (!targetId && lastKnownUrl) {
+    // Extract conversation ID for fuzzy matching (URL may have trailing params)
+    const conversationId = extractConversationIdFromUrl(lastKnownUrl);
+    // Try exact URL match first
+    const exactMatch = targets.find(
+      (t) => t.type === "page" && t.url === lastKnownUrl,
+    );
+    if (exactMatch) {
+      logger(`[browser] [recovery] exact URL match: ${exactMatch.url.slice(0, 80)}`);
+      targetId = exactMatch.id;
+    } else if (conversationId) {
+      // Fall back to conversation ID match
+      const cidMatch = targets.find(
+        (t) => t.type === "page" && t.url.includes(conversationId),
+      );
+      if (cidMatch) {
+        logger(`[browser] [recovery] conversation ID match (${conversationId}): ${cidMatch.url.slice(0, 80)}`);
+        targetId = cidMatch.id;
+      }
+    }
+  }
+  if (!targetId) {
+    logger(`[browser] [recovery] no matching target found — listing all targets for diagnostics`);
+    for (const t of targets) {
+      logger(`[browser] [recovery]   target ${t.id}: type=${t.type} url=${t.url.slice(0, 80)}`);
+    }
+    return null;
+  }
+
+  // Step 3: Reconnect CDP
+  logger(`[browser] [recovery] reconnecting to target ${targetId}`);
+  let reconnectedClient: ChromeClient;
+  try {
+    reconnectedClient = await CDP({ host: effectiveHost, port, target: targetId });
+    logger(`[browser] [recovery] CDP reconnected successfully`);
+  } catch (err) {
+    logger(`[browser] [recovery] CDP reconnect failed: ${err instanceof Error ? err.message : err}`);
+    return null;
+  }
+
+  // Step 4: Enable Runtime and read the assistant snapshot
+  try {
+    await reconnectedClient.Runtime.enable();
+    logger(`[browser] [recovery] Runtime enabled — reading assistant snapshot (minTurnIndex=${minTurnIndex ?? "none"})`);
+
+    // Wait briefly for any in-flight rendering to settle
+    await delay(2000);
+
+    // Diagnostic: check what the DOM actually contains before the snapshot filter
+    let diagStopVisible = false;
+    try {
+      const diag = await reconnectedClient.Runtime.evaluate({
+        expression: `(() => {
+          const allTurns = document.querySelectorAll('section[data-testid^="conversation-turn"], article[data-testid^="conversation-turn"], div[data-testid^="conversation-turn"], section[data-message-author-role], article[data-message-author-role], div[data-message-author-role], section[data-turn], article[data-turn], div[data-turn]');
+          const assistantTurns = document.querySelectorAll('[data-message-author-role="assistant"], [data-turn="assistant"]');
+          const lastAssistant = assistantTurns[assistantTurns.length - 1];
+          return {
+            totalTurns: allTurns.length,
+            assistantTurns: assistantTurns.length,
+            lastAssistantText: lastAssistant ? (lastAssistant.textContent || '').slice(0, 200) : 'none',
+            lastAssistantIndex: lastAssistant ? Array.from(allTurns).indexOf(lastAssistant.closest('section, article, div[data-testid^="conversation-turn"]') || lastAssistant) : -1,
+            stopVisible: Boolean(document.querySelector('[data-testid="stop-button"]')),
+          };
+        })()`,
+        returnByValue: true,
+      });
+      const d = diag.result?.value as Record<string, unknown> | undefined;
+      diagStopVisible = Boolean(d?.stopVisible);
+      logger(`[browser] [recovery] DOM diagnostic — totalTurns=${d?.totalTurns} assistantTurns=${d?.assistantTurns} lastAssistantIndex=${d?.lastAssistantIndex} stop=${d?.stopVisible} textPreview="${String(d?.lastAssistantText ?? '').slice(0, 100)}"`);
+    } catch (diagErr) {
+      logger(`[browser] [recovery] DOM diagnostic failed: ${diagErr instanceof Error ? diagErr.message : diagErr}`);
+    }
+
+    // If the stop button is still visible, ChatGPT is still thinking.
+    // Poll for completion instead of capturing an interim thinking snippet.
+    if (diagStopVisible && remainingTimeoutMs && remainingTimeoutMs > 0) {
+      logger(`[browser] [recovery] stop button still visible — entering poll loop (timeout=${Math.round(remainingTimeoutMs / 1000)}s)`);
+      try {
+        const pollResult = await pollAssistantCompletion(
+          reconnectedClient.Runtime,
+          remainingTimeoutMs,
+          minTurnIndex,
+          undefined,
+          logger,
+          null,
+        );
+        if (pollResult) {
+          logger(`[browser] [recovery] poll completed — ${pollResult.text.length} chars`);
+          return pollResult;
+        }
+        logger(`[browser] [recovery] poll returned null — falling through to one-shot snapshot`);
+      } catch (pollErr) {
+        logger(`[browser] [recovery] poll failed: ${pollErr instanceof Error ? pollErr.message : pollErr} — falling through to one-shot snapshot`);
+      }
+    }
+
+    // One-shot snapshot: either stop was already gone, or polling failed/timed out.
+    let snapshot = await readAssistantSnapshot(
+      reconnectedClient.Runtime,
+      minTurnIndex,
+    );
+
+    // If filtered snapshot is empty, try again without the filter
+    if (!snapshot?.text?.trim() && typeof minTurnIndex === "number") {
+      logger(`[browser] [recovery] filtered snapshot empty — retrying without minTurnIndex filter`);
+      snapshot = await readAssistantSnapshot(
+        reconnectedClient.Runtime,
+        undefined,
+      );
+    }
+
+    if (!snapshot || !snapshot.text?.trim()) {
+      logger(`[browser] [recovery] snapshot empty or no text found`);
+      return null;
+    }
+
+    const text = snapshot.text.trim();
+    logger(`[browser] [recovery] captured ${text.length} chars — preview: ${text.slice(0, 120).replace(/\n/g, " ")}`);
+
+    return {
+      text,
+      html: snapshot.html ?? undefined,
+      meta: {
+        turnId: snapshot.turnId ?? undefined,
+        messageId: snapshot.messageId ?? undefined,
+      },
+    };
+  } catch (err) {
+    logger(`[browser] [recovery] snapshot capture failed: ${err instanceof Error ? err.message : err}`);
+    return null;
+  } finally {
+    try {
+      await reconnectedClient.close();
+      logger(`[browser] [recovery] cleanup — reconnected client closed`);
+    } catch {
+      // best-effort cleanup
+    }
+  }
 }

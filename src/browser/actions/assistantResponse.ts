@@ -2,6 +2,7 @@ import type { ChromeClient, BrowserLogger } from "../types.js";
 import {
   ANSWER_SELECTORS,
   ASSISTANT_ROLE_SELECTOR,
+  COMPOSER_SUBMIT_BUTTON_SELECTOR,
   CONVERSATION_TURN_SELECTOR,
   COPY_BUTTON_SELECTOR,
   FINISHED_ACTIONS_SELECTOR,
@@ -24,9 +25,10 @@ const CONSECUTIVE_EVAL_FAILURE_LIMIT = 20;
 const TEXT_STABILITY_THRESHOLD = 15;
 const MIN_PARTIAL_CHARS = 200;
 // Second poller runs when the evaluation returns but the stop button is still
-// visible (ChatGPT Extended Pro thinking). No hardcoded cap — use the full
-// remaining time from the parent timeout. Thinking phases can last 30+ minutes.
-const SECOND_POLLER_MAX_TIMEOUT_MS = Infinity;
+// visible (ChatGPT Extended Pro thinking). Cap at 45 minutes — even extended
+// thinking models finish within this window. Prevents indefinite waiting when
+// the stop button gets stuck in the DOM or Chrome becomes unresponsive.
+const SECOND_POLLER_MAX_TIMEOUT_MS = 45 * 60 * 1_000;
 
 interface AssistantDomContext {
   session: ReturnType<typeof getChatgptDomSession>;
@@ -223,7 +225,7 @@ export async function waitForAssistantResponse(
   if (remainingMs > 0) {
     const generationState = await readAssistantGenerationUiState(Runtime, domContext);
     const dbg = generationState.debug;
-    logger(`[browser] [response] post-eval state — stop=${generationState.stopVisible} completion=${generationState.completionVisible} turns=${dbg?.turnCount ?? "?"} copyGlobal=${dbg?.copyButtonGlobal ?? "?"} copyInTurn=${dbg?.copyButtonInTurn ?? "?"}`);
+    logger(`[browser] [response] post-eval state — stop=${generationState.stopVisible} completion=${generationState.completionVisible} turns=${dbg?.turnCount ?? "?"} copyGlobal=${dbg?.copyButtonGlobal ?? "?"} copyInTurn=${dbg?.copyButtonInTurn ?? "?"} composerReady=${dbg?.composerReady ?? "?"}`);
     if (generationState.stopVisible) {
       const secondPollerTimeout = Math.min(remainingMs, SECOND_POLLER_MAX_TIMEOUT_MS);
       logger(`[browser] [response] entering second poller — candidate=${candidate.text.length} chars, timeout=${secondPollerTimeout}ms`);
@@ -240,10 +242,25 @@ export async function waitForAssistantResponse(
           logger(`[browser] [response] second poller completed — ${completed.text.length} chars`);
           return completed;
         }
-        logger(`[browser] [response] second poller returned null — returning candidate (${candidate.text.length} chars)`);
+        logger(`[browser] [response] second poller returned null — attempting final snapshot`);
       } catch (pollerError) {
-        logger(`[browser] [response] second poller failed (CDP disconnect?) — returning candidate (${candidate.text.length} chars)`);
+        logger(`[browser] [response] second poller failed (CDP disconnect?) — attempting final snapshot`);
       }
+      // The second poller timed out or Chrome disconnected. Attempt one last
+      // snapshot capture — Chrome may still be responsive enough for a single
+      // evaluation even if the polling loop failed. Pick the longest text
+      // between the initial candidate and the final snapshot.
+      try {
+        const finalSnapshot = await readAssistantSnapshot(Runtime, minTurnIndex, domContext);
+        const finalResult = normalizeAssistantSnapshot(finalSnapshot);
+        if (finalResult && finalResult.text.length > candidate.text.length) {
+          logger(`[browser] [response] final snapshot captured ${finalResult.text.length} chars (was ${candidate.text.length}) — using snapshot`);
+          return finalResult;
+        }
+      } catch {
+        // Chrome is truly gone — fall through to candidate
+      }
+      logger(`[browser] [response] returning candidate (${candidate.text.length} chars)`);
     }
   }
 
@@ -534,7 +551,7 @@ async function terminateRuntimeExecution(Runtime: ChromeClient["Runtime"]): Prom
   }
 }
 
-async function pollAssistantCompletion(
+export async function pollAssistantCompletion(
   Runtime: ChromeClient["Runtime"],
   timeoutMs: number,
   minTurnIndex?: number,
@@ -558,6 +575,17 @@ async function pollAssistantCompletion(
   let lastCompletionVisible = false;
   let noStopStableCycles = 0;
   let consecutiveEvalFailures = 0;
+  // Track how many times completionVisible has been true while stop is also true.
+  // This catches multi-turn thinking patterns where copy buttons flicker on/off
+  // as ChatGPT transitions between turns during extended thinking.
+  let completionFlickerCount = 0;
+  const COMPLETION_FLICKER_THRESHOLD = 3;
+  // After flicker threshold is met, require text stability (no growth for N cycles)
+  // before declaring completion. Prevents cutting off extended thinking runs that
+  // emit interim turns and keep going.
+  const FLICKER_STABILITY_CYCLES = 5;
+  let lastPartialLength = 0;
+  let textStableCycles = 0;
   if (logger) {
     logger(`[browser] [poll] start — timeout=${timeoutMs}ms minTurn=${minTurnIndex ?? "none"}`);
   }
@@ -590,7 +618,7 @@ async function pollAssistantCompletion(
     let generationState: {
       stopVisible: boolean;
       completionVisible: boolean;
-      debug?: { turnCount: number; lastAssistantFound: boolean; copyButtonGlobal: boolean; copyButtonInTurn: boolean };
+      debug?: { turnCount: number; lastAssistantFound: boolean; copyButtonGlobal: boolean; copyButtonInTurn: boolean; composerReady?: boolean };
     };
     try {
       generationState = await readAssistantGenerationUiState(Runtime, domContext);
@@ -601,7 +629,10 @@ async function pollAssistantCompletion(
         const msg = evalError instanceof Error ? evalError.message : String(evalError);
         logger(`[browser] [poll] Runtime.evaluate FAILED cycle=${pollCycles} consecutive=${consecutiveEvalFailures} error=${msg.slice(0, 200)}`);
       }
-      generationState = { stopVisible: false, completionVisible: false };
+      // Keep the LAST KNOWN state instead of defaulting to { stopVisible: false }.
+      // Defaulting to false would bias the state machine toward "stop disappeared",
+      // falsely triggering the no-stop fallback during transient eval failures.
+      generationState = { stopVisible: lastStopVisible, completionVisible: lastCompletionVisible };
     }
     pollCycles += 1;
 
@@ -615,8 +646,10 @@ async function pollAssistantCompletion(
           lastPartialText,
           domContext,
         );
-      } catch {
-        // best-effort
+      } catch (captureErr) {
+        if (logger) {
+          logger(`[browser] [poll] stop-transition partial capture failed: ${captureErr instanceof Error ? captureErr.message : captureErr}`);
+        }
       }
     }
 
@@ -638,8 +671,13 @@ async function pollAssistantCompletion(
           lastPartialText,
           domContext,
         );
-      } catch {
-        // best-effort
+        if (logger && lastPartialText.length > 0) {
+          logger(`[browser] [poll] early partial capture succeeded: ${lastPartialText.length} chars`);
+        }
+      } catch (captureErr) {
+        if (logger) {
+          logger(`[browser] [poll] early partial capture failed (noStopStable=${noStopStableCycles}): ${captureErr instanceof Error ? captureErr.message : captureErr}`);
+        }
       }
     }
 
@@ -665,6 +703,14 @@ async function pollAssistantCompletion(
       consecutiveEvalFailures = 0;
     }
 
+    // Track completion flicker BEFORE updating lastCompletionVisible.
+    // completionVisible goes true while stop is also true during multi-turn
+    // thinking when copy buttons appear briefly before a new turn starts.
+    // Seeing this pattern multiple times is a strong signal of substantial output.
+    if (generationState.stopVisible && generationState.completionVisible && !lastCompletionVisible) {
+      completionFlickerCount += 1;
+    }
+
     if (
       generationState.stopVisible !== lastStopVisible ||
       generationState.completionVisible !== lastCompletionVisible
@@ -673,7 +719,7 @@ async function pollAssistantCompletion(
         const elapsedSec = Math.round((Date.now() - pollStartMs) / 1000);
         const dbg = generationState.debug;
         const debugStr = dbg
-          ? ` turns=${dbg.turnCount} lastAsst=${dbg.lastAssistantFound} copyGlobal=${dbg.copyButtonGlobal} copyInTurn=${dbg.copyButtonInTurn}`
+          ? ` turns=${dbg.turnCount} lastAsst=${dbg.lastAssistantFound} copyGlobal=${dbg.copyButtonGlobal} copyInTurn=${dbg.copyButtonInTurn} composerReady=${dbg.composerReady ?? false}`
           : "";
         logger(
           `[browser] [poll] state change at ${elapsedSec}s cycle=${pollCycles} stop=${generationState.stopVisible} completion=${generationState.completionVisible}${debugStr}`,
@@ -687,10 +733,10 @@ async function pollAssistantCompletion(
       const remainSec = Math.round((watchdogDeadline - Date.now()) / 1000);
       const dbg = generationState.debug;
       const debugStr = dbg
-        ? ` turns=${dbg.turnCount} lastAsst=${dbg.lastAssistantFound} copyGlobal=${dbg.copyButtonGlobal} copyInTurn=${dbg.copyButtonInTurn}`
+        ? ` turns=${dbg.turnCount} lastAsst=${dbg.lastAssistantFound} copyGlobal=${dbg.copyButtonGlobal} copyInTurn=${dbg.copyButtonInTurn} composerReady=${dbg.composerReady ?? false}`
         : "";
       logger(
-        `[browser] [poll] heartbeat at ${elapsedSec}s cycle=${pollCycles} stop=${generationState.stopVisible} completion=${generationState.completionVisible}${debugStr} stableNoStop=${noStopStableCycles} remaining=${remainSec}s`,
+        `[browser] [poll] heartbeat at ${elapsedSec}s cycle=${pollCycles} stop=${generationState.stopVisible} completion=${generationState.completionVisible}${debugStr} stableNoStop=${noStopStableCycles} flickers=${completionFlickerCount} remaining=${remainSec}s`,
       );
       nextStatusLogAt = Date.now() + 60_000;
     }
@@ -704,19 +750,47 @@ async function pollAssistantCompletion(
       done = true;
       break;
     }
-    // Fallback: if stop button is gone for 15+ seconds and we have captured
-    // substantial text via partial capture, treat as complete. This handles
-    // cases where ChatGPT's DOM structure changed and the copy button
-    // selector no longer matches.
+    // Fallback: if stop button is gone for enough cycles, treat as complete.
+    // Primary: 15+ cycles with partial text (copy button selector may have changed).
+    // Extended: 60+ cycles without any partial text — partial capture can silently
+    // fail when DOM selectors don't match, but 60s of no stop button is definitive.
     if (
       !generationState.stopVisible &&
       noStopStableCycles >= TEXT_STABILITY_THRESHOLD &&
-      lastPartialText.length >= MIN_PARTIAL_CHARS
+      (lastPartialText.length >= MIN_PARTIAL_CHARS || noStopStableCycles >= 60)
     ) {
       if (logger) {
         const elapsedSec = Math.round((Date.now() - pollStartMs) / 1000);
         logger(
           `[browser] [poll] fallback completion at ${elapsedSec}s cycle=${pollCycles} — stop gone for ${noStopStableCycles} cycles, partial=${lastPartialText.length} chars`,
+        );
+      }
+      done = true;
+      break;
+    }
+    // Track text stability for the flicker heuristic.
+    // When partial text length changes, reset the stability counter.
+    if (lastPartialText.length !== lastPartialLength) {
+      lastPartialLength = lastPartialText.length;
+      textStableCycles = 0;
+    } else {
+      textStableCycles += 1;
+    }
+    // Completion flicker heuristic: if completionVisible has flickered on/off
+    // multiple times while stop stays true, the model is producing multi-turn
+    // output. Requires BOTH partial text AND text stability — prevents cutting
+    // off extended thinking runs that emit interim turns and keep going.
+    if (
+      generationState.stopVisible &&
+      !generationState.completionVisible &&
+      completionFlickerCount >= COMPLETION_FLICKER_THRESHOLD &&
+      lastPartialText.length >= MIN_PARTIAL_CHARS &&
+      textStableCycles >= FLICKER_STABILITY_CYCLES
+    ) {
+      if (logger) {
+        const elapsedSec = Math.round((Date.now() - pollStartMs) / 1000);
+        logger(
+          `[browser] [poll] flicker-based completion at ${elapsedSec}s cycle=${pollCycles} — ${completionFlickerCount} flickers, partial=${lastPartialText.length} chars, stable=${textStableCycles} cycles`,
         );
       }
       done = true;
@@ -729,7 +803,7 @@ async function pollAssistantCompletion(
     if (logger) {
       const elapsedSec = Math.round((Date.now() - pollStartMs) / 1000);
       logger(
-        `[browser] [poll] ${abortSignal?.aborted ? "aborted" : "TIMED OUT"} at ${elapsedSec}s cycle=${pollCycles} stop=${lastStopVisible} completion=${lastCompletionVisible}`,
+        `[browser] [poll] ${abortSignal?.aborted ? "aborted" : "TIMED OUT"} at ${elapsedSec}s cycle=${pollCycles} stop=${lastStopVisible} completion=${lastCompletionVisible} flickers=${completionFlickerCount}`,
       );
     }
     return null;
@@ -771,7 +845,7 @@ async function readAssistantGenerationUiState(
 ): Promise<{
   stopVisible: boolean;
   completionVisible: boolean;
-  debug?: { turnCount: number; lastAssistantFound: boolean; copyButtonGlobal: boolean; copyButtonInTurn: boolean };
+  debug?: { turnCount: number; lastAssistantFound: boolean; copyButtonGlobal: boolean; copyButtonInTurn: boolean; composerReady?: boolean };
 }> {
   try {
     let latestTurnOracleId: string | null = null;
@@ -787,7 +861,25 @@ async function readAssistantGenerationUiState(
     }
     const { result } = await Runtime.evaluate({
       expression: `(() => {
-        const stopVisible = Boolean(document.querySelector(${JSON.stringify(STOP_BUTTON_SELECTOR)}));
+        // Check if the stop button element exists in the DOM
+        let stopVisible = Boolean(document.querySelector(${JSON.stringify(STOP_BUTTON_SELECTOR)}));
+
+        // Composer-ready override: the composer submit button transitions between
+        // "Stop streaming" (during generation) and "Start Voice"/"Send" (when ready).
+        // If the button exists but is NOT in the stop state, generation is complete
+        // even if a stale stop-button element lingers in the DOM.
+        let composerReady = false;
+        if (stopVisible) {
+          const composerBtn = document.querySelector(${JSON.stringify(COMPOSER_SUBMIT_BUTTON_SELECTOR)});
+          if (composerBtn) {
+            const label = (composerBtn.getAttribute('aria-label') || '').toLowerCase();
+            if (!label.includes('stop')) {
+              stopVisible = false;
+              composerReady = true;
+            }
+          }
+        }
+
         const latestTurnOracleId = ${JSON.stringify(latestTurnOracleId)};
 
         const CONV_SEL = ${JSON.stringify(CONVERSATION_TURN_SELECTOR)};
@@ -865,6 +957,7 @@ async function readAssistantGenerationUiState(
             lastAssistantFound,
             copyButtonGlobal,
             copyButtonInTurn,
+            composerReady,
           },
         };
       })()`,
@@ -874,7 +967,7 @@ async function readAssistantGenerationUiState(
       | {
           stopVisible?: unknown;
           completionVisible?: unknown;
-          debug?: { turnCount: number; lastAssistantFound: boolean; copyButtonGlobal: boolean; copyButtonInTurn: boolean };
+          debug?: { turnCount: number; lastAssistantFound: boolean; copyButtonGlobal: boolean; copyButtonInTurn: boolean; composerReady?: boolean };
         }
       | undefined;
     return {
@@ -972,6 +1065,7 @@ function buildResponseObserverExpression(timeoutMs: number, minTurnIndex?: numbe
     ${buildClickDispatcher()}
     const SELECTORS = ${selectorsLiteral};
     const STOP_SELECTOR = '${STOP_BUTTON_SELECTOR}';
+    const COMPOSER_BTN_SELECTOR = '${COMPOSER_SUBMIT_BUTTON_SELECTOR}';
     const FINISHED_SELECTOR = '${FINISHED_ACTIONS_SELECTOR}';
     const CONVERSATION_SELECTOR = ${conversationLiteral};
     const ASSISTANT_SELECTOR = ${assistantLiteral};
@@ -1161,7 +1255,19 @@ function buildResponseObserverExpression(timeoutMs: number, minTurnIndex?: numbe
         } else {
           stableCycles += 1;
         }
-        const stopVisible = Boolean(document.querySelector(STOP_SELECTOR));
+        let stopVisible = Boolean(document.querySelector(STOP_SELECTOR));
+        // Composer-ready override: if the composer button has transitioned away
+        // from "Stop streaming", generation is done even if the stop-button
+        // element lingers in the DOM.
+        if (stopVisible) {
+          const composerBtn = document.querySelector(COMPOSER_BTN_SELECTOR);
+          if (composerBtn) {
+            const label = (composerBtn.getAttribute('aria-label') || '').toLowerCase();
+            if (!label.includes('stop')) {
+              stopVisible = false;
+            }
+          }
+        }
         const finishedVisible = isLastAssistantTurnFinished();
 
         if (finishedVisible || (!stopVisible && stableCycles >= stableTarget)) {
