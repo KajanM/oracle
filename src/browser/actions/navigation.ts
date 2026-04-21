@@ -3,6 +3,7 @@ import { CLOUDFLARE_SCRIPT_SELECTOR, CLOUDFLARE_TITLE, INPUT_SELECTORS } from ".
 import { delay } from "../utils.js";
 import { logDomFailure } from "../domDebug.js";
 import { BrowserAutomationError } from "../../oracle/errors.js";
+import { extractConversationIdFromUrl } from "../reattachHelpers.js";
 
 export function installJavaScriptDialogAutoDismissal(
   Page: ChromeClient["Page"],
@@ -139,6 +140,29 @@ async function dismissBlockingUi(
   return false;
 }
 
+export async function assertCurrentConversationId(
+  Runtime: ChromeClient["Runtime"],
+  expectedConversationId: string,
+  logger: BrowserLogger,
+): Promise<void> {
+  const href = await currentUrl(Runtime);
+  const currentId = href ? extractConversationIdFromUrl(href) : undefined;
+  if (currentId !== expectedConversationId) {
+    throw new BrowserAutomationError(
+      `Oracle refused to submit: expected ChatGPT conversation /c/${expectedConversationId}, but landed on ${
+        href ?? "(unknown url)"
+      }. The requested thread may have been deleted, moved, or is inaccessible with the current account.`,
+      {
+        stage: "conversation-mismatch",
+        expectedConversationId,
+        currentConversationId: currentId,
+        href,
+      },
+    );
+  }
+  logger(`[browser] [nav] conversation id verified = ${expectedConversationId}`);
+}
+
 export async function navigateToPromptReadyWithFallback(
   Page: ChromeClient["Page"],
   Runtime: ChromeClient["Runtime"],
@@ -149,6 +173,7 @@ export async function navigateToPromptReadyWithFallback(
   const navigate = deps.navigateToChatGPT ?? navigateToChatGPT;
   const ensureBlocked = deps.ensureNotBlocked ?? ensureNotBlocked;
   const ensureReady = deps.ensurePromptReady ?? ensurePromptReady;
+  const expectedConversationId = extractConversationIdFromUrl(url);
 
   await navigate(Page, Runtime, url, logger);
   await ensureBlocked(Runtime, headless, logger);
@@ -158,8 +183,17 @@ export async function navigateToPromptReadyWithFallback(
   });
   try {
     await ensureReady(Runtime, timeoutMs, logger);
+    if (expectedConversationId) {
+      await assertCurrentConversationId(Runtime, expectedConversationId, logger);
+    }
     return { usedFallback: false };
   } catch (error) {
+    if (expectedConversationId) {
+      // When the caller requested a specific ChatGPT conversation, do NOT silently
+      // fall back to the base URL — that would post into a brand-new thread while
+      // the caller believes the prior conversation is being continued.
+      throw error;
+    }
     if (!fallbackUrl || fallbackUrl === url) {
       throw error;
     }

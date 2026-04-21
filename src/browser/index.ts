@@ -24,6 +24,7 @@ import { syncCookies } from "./cookies.js";
 import {
   navigateToChatGPT,
   navigateToPromptReadyWithFallback,
+  assertCurrentConversationId,
   ensureNotBlocked,
   ensureLoggedIn,
   ensurePromptReady,
@@ -1430,6 +1431,12 @@ async function runRemoteBrowserMode(
     await ensureLoggedIn(Runtime, logger, { remoteSession: true });
     await bringPageToFront();
     await ensurePromptReady(Runtime, config.inputTimeoutMs, logger);
+    {
+      const expectedConversationId = extractConversationIdFromUrl(config.url);
+      if (expectedConversationId) {
+        await assertCurrentConversationId(Runtime, expectedConversationId, logger);
+      }
+    }
     logger(
       `Prompt textarea ready (initial focus, ${promptText.length.toLocaleString()} chars queued)`,
     );

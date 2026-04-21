@@ -1,6 +1,7 @@
 export {
   navigateToChatGPT,
   navigateToPromptReadyWithFallback,
+  assertCurrentConversationId,
   ensureNotBlocked,
   ensureLoggedIn,
   ensurePromptReady,

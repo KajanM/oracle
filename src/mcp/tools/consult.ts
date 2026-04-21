@@ -76,6 +76,13 @@ const consultInputShape = {
     .boolean()
     .optional()
     .describe("Browser-only: keep Chrome running after completion (useful for debugging)."),
+  browserConversationUrl: z
+    .string()
+    .url()
+    .optional()
+    .describe(
+      "Browser-only: existing ChatGPT conversation URL to continue, e.g. https://chatgpt.com/c/{conversationId}. When set, Oracle navigates to that URL instead of the base ChatGPT page so the run continues an existing thread.",
+    ),
   search: z
     .boolean()
     .optional()
@@ -121,7 +128,15 @@ const consultOutputShape = {
   status: z.string(),
   output: z.string(),
   models: z.array(consultModelSummaryShape).optional(),
+  browserConversationUrl: z.string().optional(),
+  browserConversationId: z.string().optional(),
 } satisfies z.ZodRawShape;
+
+function extractConversationId(url?: string | null): string | undefined {
+  if (!url) return undefined;
+  const match = url.match(/\/c\/([a-zA-Z0-9-]+)/);
+  return match?.[1];
+}
 
 export type ConsultModelSummary = z.infer<typeof consultModelSummaryShape>;
 
@@ -166,6 +181,7 @@ export function buildConsultBrowserConfig({
   browserModelLabel,
   browserThinkingTime,
   browserKeepBrowser,
+  browserConversationUrl,
 }: {
   userConfig: UserConfig;
   env: Record<string, string | undefined>;
@@ -174,6 +190,7 @@ export function buildConsultBrowserConfig({
   browserModelLabel?: string;
   browserThinkingTime?: "light" | "standard" | "extended" | "heavy";
   browserKeepBrowser?: boolean;
+  browserConversationUrl?: string;
 }): BrowserSessionConfig {
   const configuredBrowser = userConfig.browser ?? {};
   const envProfileDir = (env.ORACLE_BROWSER_PROFILE_DIR ?? "").trim();
@@ -183,7 +200,11 @@ export function buildConsultBrowserConfig({
   const desiredModelLabel = isChatGptModel
     ? mapModelToBrowserLabel(runModel)
     : resolveBrowserModelLabel(preferredLabel, runModel);
-  const configuredUrl = configuredBrowser.chatgptUrl ?? configuredBrowser.url ?? CHATGPT_URL;
+  const requestedConversationUrl = browserConversationUrl?.trim();
+  const configuredUrl =
+    requestedConversationUrl && requestedConversationUrl.length > 0
+      ? requestedConversationUrl
+      : (configuredBrowser.chatgptUrl ?? configuredBrowser.url ?? CHATGPT_URL);
   const manualLogin = hasProfileDir ? true : (configuredBrowser.manualLogin ?? false);
 
   return {
@@ -228,6 +249,7 @@ export function registerConsultTool(server: McpServer): void {
         browserBundleFiles,
         browserThinkingTime,
         browserKeepBrowser,
+        browserConversationUrl,
         slug,
       } = consultInputSchema.parse(input);
       const { config: userConfig } = await loadUserConfig();
@@ -284,6 +306,7 @@ export function registerConsultTool(server: McpServer): void {
           browserModelLabel,
           browserThinkingTime,
           browserKeepBrowser,
+          browserConversationUrl,
         });
       }
 
@@ -362,6 +385,12 @@ export function registerConsultTool(server: McpServer): void {
         const summary = `Session ${sessionMeta.id} (${finalMeta.status})`;
         const logTail = await readSessionLogTail(sessionMeta.id, 4000);
         const modelsSummary = summarizeModelRunsForConsult(finalMeta.models);
+        const runtime = finalMeta.browser?.runtime;
+        const capturedTabUrl = runtime?.tabUrl;
+        const finalBrowserConversationUrl =
+          capturedTabUrl && capturedTabUrl.includes("/c/") ? capturedTabUrl : undefined;
+        const finalBrowserConversationId =
+          runtime?.conversationId ?? extractConversationId(finalBrowserConversationUrl);
         return {
           content: textContent([summary, logTail || "(log empty)"].join("\n").trim()),
           structuredContent: {
@@ -369,6 +398,8 @@ export function registerConsultTool(server: McpServer): void {
             status: finalMeta.status,
             output: logTail ?? "",
             models: modelsSummary,
+            browserConversationUrl: finalBrowserConversationUrl,
+            browserConversationId: finalBrowserConversationId,
           },
         };
       } catch (error) {
