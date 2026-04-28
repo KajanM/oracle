@@ -27,38 +27,15 @@ const sessionsInputShape = {
     .describe("When id is set, include session metadata + stored request + full log text."),
 } satisfies z.ZodRawShape;
 
-const sessionsOutputShape = {
-  entries: z
-    .array(
-      z.object({
-        id: z.string(),
-        createdAt: z.string(),
-        status: z.string(),
-        model: z.string().optional(),
-        mode: z.string().optional(),
-      }),
-    )
-    .optional(),
-  total: z.number().optional(),
-  truncated: z.boolean().optional(),
-  session: z
-    .object({
-      metadata: z.record(z.string(), z.any()),
-      log: z.string(),
-      request: z.record(z.string(), z.any()).optional(),
-    })
-    .optional(),
-} satisfies z.ZodRawShape;
-
 export function registerSessionsTool(server: McpServer): void {
-  server.registerTool(
+  // Keep the advertised tool schema conservative for Claude Code compatibility;
+  // see the same note in consult.ts. `structuredContent` is still returned.
+  const registeredTool = server.registerTool(
     "sessions",
     {
-      title: "List or fetch oracle sessions",
       description:
         "Inspect Oracle session history stored under `ORACLE_HOME_DIR` (shared with the CLI). List recent sessions or fetch one by id/slug (optionally including metadata + request + log).",
       inputSchema: sessionsInputShape,
-      outputSchema: sessionsOutputShape,
     },
     async (input: unknown) => {
       const textContent = (text: string) => [{ type: "text" as const, text }];
@@ -139,4 +116,7 @@ export function registerSessionsTool(server: McpServer): void {
       };
     },
   );
+  if (registeredTool) {
+    (registeredTool as unknown as { execution?: unknown }).execution = undefined;
+  }
 }

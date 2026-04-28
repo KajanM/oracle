@@ -123,15 +123,6 @@ const consultModelSummaryShape = z.object({
   logPath: z.string().optional(),
 });
 
-const consultOutputShape = {
-  sessionId: z.string(),
-  status: z.string(),
-  output: z.string(),
-  models: z.array(consultModelSummaryShape).optional(),
-  browserConversationUrl: z.string().optional(),
-  browserConversationId: z.string().optional(),
-} satisfies z.ZodRawShape;
-
 function extractConversationId(url?: string | null): string | undefined {
   if (!url) return undefined;
   const match = url.match(/\/c\/([a-zA-Z0-9-]+)/);
@@ -225,15 +216,17 @@ export function buildConsultBrowserConfig({
 }
 
 export function registerConsultTool(server: McpServer): void {
-  server.registerTool(
+  // Avoid advertising outputSchema or newer task metadata. Some MCP clients
+  // (notably Claude Code 2.1.x) currently drop the stdio connection during
+  // startup when newer fields such as `execution` and `outputSchema` are
+  // present in `tools/list`. The runtime result still includes
+  // `structuredContent`; we just keep the advertised schema minimal.
+  const registeredTool = server.registerTool(
     "consult",
     {
-      title: "Run an oracle session",
       description:
         'Run a one-shot Oracle session (API or ChatGPT browser automation). Use `files` to attach project context. For browser-based image/file uploads, set `browserAttachments:"always"`. Sessions are stored under `ORACLE_HOME_DIR` (shared with the CLI).',
-      // Cast to any to satisfy SDK typings across differing Zod versions.
       inputSchema: consultInputShape,
-      outputSchema: consultOutputShape,
     },
     async (input: unknown) => {
       const textContent = (text: string) => [{ type: "text" as const, text }];
@@ -412,4 +405,11 @@ export function registerConsultTool(server: McpServer): void {
       }
     },
   );
+  // The 2026 SDK stores this metadata on every registered tool and includes it
+  // in `tools/list`. Older Claude Code MCP clients do not need it and have been
+  // observed to drop the stdio connection after receiving it. Setting it to
+  // undefined keeps the JSON-RPC response on the conservative 2024-era shape.
+  if (registeredTool) {
+    (registeredTool as unknown as { execution?: unknown }).execution = undefined;
+  }
 }
