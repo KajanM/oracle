@@ -805,6 +805,25 @@ bridgeCommand
     await runBridgeClaudeConfig(commandOptions);
   });
 
+bridgeCommand
+  .command("status")
+  .description("Show health and active/recent run state for a remote `oracle serve` host.")
+  .option(
+    "--host <host:port>",
+    "Override remote host (default: ORACLE_REMOTE_HOST or ~/.oracle/config.json browser.remoteHost).",
+  )
+  .option("--token <token>", "Override remote token (default: ORACLE_REMOTE_TOKEN or config).")
+  .option(
+    "--config <path>",
+    "Override the oracle config file location (default ~/.oracle/config.json).",
+  )
+  .option("--json", "Emit raw JSON instead of human-readable output.", false)
+  .option("--timeout <ms>", "Timeout for health/runs probes (default 5000).", parseIntOption, 5000)
+  .action(async (commandOptions) => {
+    const { runBridgeStatus } = await import("../src/cli/bridge/status.js");
+    await runBridgeStatus(commandOptions);
+  });
+
 program
   .command("tui")
   .description("Launch the interactive terminal UI for humans (no automation).")

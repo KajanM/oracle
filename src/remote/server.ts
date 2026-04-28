@@ -9,7 +9,12 @@ import chalk from "chalk";
 import type { BrowserAttachment, BrowserLogger, CookieParam } from "../browser/types.js";
 import { runBrowserMode } from "../browserMode.js";
 import type { BrowserRunResult } from "../browserMode.js";
-import type { RemoteRunPayload, RemoteRunEvent } from "./types.js";
+import type {
+  RemoteRunPayload,
+  RemoteRunEvent,
+  RemoteRunSummary,
+  RemoteRunsListing,
+} from "./types.js";
 import { getCookies, type Cookie } from "@steipete/sweet-cookie";
 import { CHATGPT_URL } from "../browser/constants.js";
 import { getCliVersion } from "../version.js";
@@ -29,6 +34,9 @@ export interface RemoteServerOptions {
   logger?: (message: string) => void;
   manualLoginDefault?: boolean;
   manualLoginProfileDir?: string;
+  // Tier 2 knobs — defaults are reasonable for a single-user remote.
+  completedRunRetentionMs?: number;
+  recentRunsLimit?: number;
 }
 
 interface RemoteServerDeps {
@@ -39,6 +47,32 @@ interface RemoteServerInstance {
   port: number;
   token: string;
   close(): Promise<void>;
+}
+
+const DEFAULT_COMPLETED_RUN_RETENTION_MS = 10 * 60_000;
+const DEFAULT_RECENT_RUNS_LIMIT = 25;
+const TCP_KEEPALIVE_INITIAL_MS = 15_000;
+
+interface RunRecord {
+  id: string;
+  status: "running" | "completed" | "errored";
+  startedAt: number;
+  endedAt?: number;
+  promptChars: number;
+  attachmentCount: number;
+  events: RemoteRunEvent[];
+  // Number of clients currently streaming this run.
+  attachedClients: Set<http.ServerResponse>;
+  totalDisconnects: number;
+  lastDisconnectAt?: number;
+  // Resolves when the underlying runBrowser promise settles. Used by the server
+  // shutdown path to wait for in-flight runs.
+  completion: Promise<void>;
+  // GC timer scheduled after the run terminates, holding the buffer for late
+  // clients. Cleared if a client reattaches.
+  gcTimer?: NodeJS.Timeout;
+  // Sequence counter — assigned at emit time, monotonic per run.
+  nextSeq: number;
 }
 
 async function findAvailablePort(): Promise<number> {
@@ -70,8 +104,22 @@ export async function createRemoteServer(
   const color = process.stdout.isTTY
     ? (formatter: (msg: string) => string, msg: string) => formatter(msg)
     : (_formatter: (msg: string) => string, msg: string) => msg;
-  // Single-flight guard: remote Chrome can only host one run at a time, so we serialize requests.
-  let busy = false;
+
+  const completedRetentionMs =
+    options.completedRunRetentionMs ?? DEFAULT_COMPLETED_RUN_RETENTION_MS;
+  const recentRunsLimit = options.recentRunsLimit ?? DEFAULT_RECENT_RUNS_LIMIT;
+
+  // Active runs by id, plus a small ring of completed runs (capped) for the
+  // /runs listing surface. Active runs are GC'd into completed-only state once
+  // their gcTimer fires, then dropped from the recent ring when it overflows.
+  const runs = new Map<string, RunRecord>();
+  const recent: string[] = [];
+
+  // Single-flight guard: remote Chrome can only host one run at a time, so we
+  // queue/reject overlapping requests. Disconnect alone does NOT free the slot
+  // — only run completion does. This is the key contract change vs. the old
+  // boolean `busy` guard.
+  let activeRunId: string | null = null;
 
   if (!process.listenerCount("unhandledRejection")) {
     process.on("unhandledRejection", (reason) => {
@@ -81,7 +129,23 @@ export async function createRemoteServer(
     });
   }
 
+  const tuneSocket = (sock: net.Socket | null | undefined) => {
+    if (!sock) return;
+    try {
+      sock.setKeepAlive(true, TCP_KEEPALIVE_INITIAL_MS);
+      sock.setNoDelay(true);
+    } catch {
+      // best-effort
+    }
+  };
+
+  server.on("connection", (socket) => {
+    tuneSocket(socket);
+  });
+
   server.on("request", async (req, res) => {
+    tuneSocket(req.socket);
+
     if (req.method === "GET" && req.url === "/status") {
       logger("[serve] Health check /status");
       res.writeHead(200, { "Content-Type": "application/json" });
@@ -106,10 +170,105 @@ export async function createRemoteServer(
           ok: true,
           version: getCliVersion(),
           uptimeSeconds: Math.round((Date.now() - startedAt) / 1000),
+          activeRunId,
+          activeRuns: activeRunId ? 1 : 0,
+          retainedRuns: runs.size,
         }),
       );
       return;
     }
+
+    // GET /runs — listing of active + recent runs (auth-gated).
+    if (req.method === "GET" && req.url === "/runs") {
+      const authHeader = req.headers.authorization ?? "";
+      if (authHeader !== `Bearer ${authToken}`) {
+        res.writeHead(401, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "unauthorized" }));
+        return;
+      }
+      const listing: RemoteRunsListing = {
+        ok: true,
+        active: [],
+        recent: [],
+        retentionMs: completedRetentionMs,
+      };
+      for (const record of runs.values()) {
+        const summary = summarizeRun(record);
+        if (record.status === "running") {
+          listing.active.push(summary);
+        } else {
+          listing.recent.push(summary);
+        }
+      }
+      listing.recent.sort((a, b) => (b.endedAt ?? "").localeCompare(a.endedAt ?? ""));
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(listing));
+      return;
+    }
+
+    // GET /runs/:id/events?cursor=N — resume an in-flight or recently completed run.
+    const resumeMatch =
+      req.method === "GET" && req.url
+        ? /^\/runs\/([^/?]+)\/events(?:\?(.*))?$/.exec(req.url)
+        : null;
+    if (resumeMatch) {
+      const authHeader = req.headers.authorization ?? "";
+      if (authHeader !== `Bearer ${authToken}`) {
+        res.writeHead(401, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "unauthorized" }));
+        return;
+      }
+      const runId = decodeURIComponent(resumeMatch[1] ?? "");
+      const cursorParam = new URLSearchParams(resumeMatch[2] ?? "").get("cursor");
+      const cursor = cursorParam ? Number.parseInt(cursorParam, 10) : -1;
+      handleResume({
+        runId,
+        cursor: Number.isFinite(cursor) ? cursor : -1,
+        runs,
+        res,
+        logger,
+        verbose,
+        completedRetentionMs,
+        retireRun,
+      });
+      return;
+    }
+
+    // POST /runs/:id/cancel — explicit cancellation of an in-flight run.
+    const cancelMatch =
+      req.method === "POST" && req.url
+        ? /^\/runs\/([^/?]+)\/cancel$/.exec(req.url)
+        : null;
+    if (cancelMatch) {
+      const authHeader = req.headers.authorization ?? "";
+      if (authHeader !== `Bearer ${authToken}`) {
+        res.writeHead(401, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "unauthorized" }));
+        return;
+      }
+      const runId = decodeURIComponent(cancelMatch[1] ?? "");
+      const record = runs.get(runId);
+      if (!record) {
+        res.writeHead(404, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "not_found" }));
+        return;
+      }
+      if (record.status !== "running") {
+        res.writeHead(409, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "not_running", status: record.status }));
+        return;
+      }
+      // Cancellation is best-effort — runBrowserMode doesn't expose a cancel
+      // primitive, so we mark the run errored and let it complete in the
+      // background. Active clients see the error event immediately.
+      const cancelMessage = "run cancelled by client";
+      emitEvent(record, { type: "error", seq: 0, message: cancelMessage }, logger);
+      retireRun(record, "errored", logger);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true, runId }));
+      return;
+    }
+
     if (req.method !== "POST" || req.url !== "/runs") {
       res.statusCode = 404;
       res.end();
@@ -127,18 +286,16 @@ export async function createRemoteServer(
       res.end(JSON.stringify({ error: "unauthorized" }));
       return;
     }
-    if (busy) {
+    if (activeRunId) {
       if (verbose) {
         logger(
-          `[serve] Busy: rejecting new run from ${formatSocket(req)} while another run is active`,
+          `[serve] Busy: rejecting new run from ${formatSocket(req)} while runId=${activeRunId} is active`,
         );
       }
       res.writeHead(409, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "busy" }));
+      res.end(JSON.stringify({ error: "busy", activeRunId }));
       return;
     }
-    busy = true;
-    const runStartedAt = Date.now();
 
     let payload: RemoteRunPayload | null = null;
     try {
@@ -148,94 +305,133 @@ export async function createRemoteServer(
         payload.browserConfig.url = normalizeChatgptUrl(payload.browserConfig.url, CHATGPT_URL);
       }
     } catch {
-      busy = false;
       res.writeHead(400, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "invalid_request" }));
       return;
     }
 
-    res.writeHead(200, { "Content-Type": "application/x-ndjson" });
-
     const runId = randomUUID();
+    activeRunId = runId;
+    const runStartedAt = Date.now();
+    const promptChars = payload?.prompt?.length ?? 0;
+    const attachmentCount = Array.isArray(payload.attachments) ? payload.attachments.length : 0;
+
     logger(
-      `[serve] Accepted run ${runId} from ${formatSocket(req)} (prompt ${payload?.prompt?.length ?? 0} chars)`,
+      `[serve] Accepted run ${runId} from ${formatSocket(req)} (prompt ${promptChars} chars, ${attachmentCount} attachments)`,
     );
+
+    res.writeHead(200, { "Content-Type": "application/x-ndjson" });
+    tuneSocket(res.socket as net.Socket | null);
+
     // Each run gets an isolated temp dir so attachments/logs don't collide.
     const runDir = await mkdtemp(path.join(os.tmpdir(), `oracle-serve-${runId}-`));
     const attachmentDir = path.join(runDir, "attachments");
     await mkdir(attachmentDir, { recursive: true });
 
-    const sendEvent = (event: RemoteRunEvent) => {
-      res.write(`${JSON.stringify(event)}\n`);
+    const record: RunRecord = {
+      id: runId,
+      status: "running",
+      startedAt: runStartedAt,
+      promptChars,
+      attachmentCount,
+      events: [],
+      attachedClients: new Set<http.ServerResponse>(),
+      totalDisconnects: 0,
+      nextSeq: 0,
+      completion: Promise.resolve(),
     };
+    runs.set(runId, record);
+    pruneRecent(record.id, runs, recent, recentRunsLimit);
 
-    const attachments: BrowserAttachment[] = [];
-    try {
-      const attachmentsPayload = Array.isArray(payload.attachments) ? payload.attachments : [];
-      for (const [index, attachment] of attachmentsPayload.entries()) {
-        const safeName = sanitizeName(attachment.fileName ?? `attachment-${index + 1}`);
-        const filePath = path.join(attachmentDir, safeName);
-        await writeFile(filePath, Buffer.from(attachment.contentBase64, "base64"));
-        attachments.push({
-          path: filePath,
-          displayPath: attachment.displayPath,
-          sizeBytes: attachment.sizeBytes,
-        });
-      }
+    attachClient(record, res, -1, logger, () => {
+      // Capture disconnect — does NOT terminate the run.
+      record.totalDisconnects += 1;
+      record.lastDisconnectAt = Date.now();
+      logger(
+        `[serve] runId=${runId} client disconnected (events=${record.events.length}, elapsed=${Date.now() - record.startedAt}ms) — run continues server-side`,
+      );
+    });
 
-      // Reuse the existing browser logger surface so clients see the same log stream.
-      const automationLogger: BrowserLogger = ((message?: string) => {
-        if (typeof message === "string") {
-          sendEvent({ type: "log", message });
-        }
-      }) as BrowserLogger;
-      automationLogger.verbose = Boolean(payload.options.verbose);
+    // Emit the runId event first so resuming clients have something to address.
+    emitEvent(record, { type: "runId", seq: 0, runId }, logger);
 
-      // Remote runs always rely on the host's own Chrome profile; ignore any inline cookie transfer.
-      if (payload.browserConfig) {
-        payload.browserConfig.inlineCookies = null;
-        payload.browserConfig.inlineCookiesSource = null;
-        payload.browserConfig.cookieSync = true;
-      } else {
-        payload.browserConfig = {} as typeof payload.browserConfig;
-      }
-
-      // Enforce manual-login profile when cookie sync is unavailable (e.g., Windows/WSL).
-      if (options.manualLoginDefault) {
-        payload.browserConfig.manualLogin = true;
-        payload.browserConfig.manualLoginProfileDir = options.manualLoginProfileDir;
-        payload.browserConfig.keepBrowser = true;
-        if (verbose) {
-          logger(
-            `[serve] Enforcing manual-login profile at ${options.manualLoginProfileDir ?? "default"} for remote run ${runId}`,
-          );
-        }
-      }
-
-      const result = await runBrowser({
-        prompt: payload.prompt,
-        attachments,
-        config: payload.browserConfig,
-        log: automationLogger,
-        heartbeatIntervalMs: payload.options.heartbeatIntervalMs,
-        verbose: payload.options.verbose,
-      });
-
-      sendEvent({ type: "result", result: sanitizeResult(result) });
-      logger(`[serve] Run ${runId} completed in ${Date.now() - runStartedAt}ms`);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      sendEvent({ type: "error", message });
-      logger(`[serve] Run ${runId} failed after ${Date.now() - runStartedAt}ms: ${message}`);
-    } finally {
-      busy = false;
-      res.end();
+    record.completion = (async () => {
+      const attachments: BrowserAttachment[] = [];
       try {
-        await rm(runDir, { recursive: true, force: true });
-      } catch {
-        // ignore cleanup errors
+        const attachmentsPayload = Array.isArray(payload!.attachments) ? payload!.attachments : [];
+        for (const [index, attachment] of attachmentsPayload.entries()) {
+          const safeName = sanitizeName(attachment.fileName ?? `attachment-${index + 1}`);
+          const filePath = path.join(attachmentDir, safeName);
+          await writeFile(filePath, Buffer.from(attachment.contentBase64, "base64"));
+          attachments.push({
+            path: filePath,
+            displayPath: attachment.displayPath,
+            sizeBytes: attachment.sizeBytes,
+          });
+        }
+
+        // Reuse the existing browser logger surface so clients see the same log stream.
+        const automationLogger: BrowserLogger = ((message?: string) => {
+          if (typeof message === "string") {
+            emitEvent(record, { type: "log", seq: 0, message }, logger);
+          }
+        }) as BrowserLogger;
+        automationLogger.verbose = Boolean(payload!.options.verbose);
+
+        // Remote runs always rely on the host's own Chrome profile; ignore any inline cookie transfer.
+        const activePayload = payload!;
+        if (activePayload.browserConfig) {
+          activePayload.browserConfig.inlineCookies = null;
+          activePayload.browserConfig.inlineCookiesSource = null;
+          activePayload.browserConfig.cookieSync = true;
+        } else {
+          activePayload.browserConfig = {} as typeof activePayload.browserConfig;
+        }
+
+        // Enforce manual-login profile when cookie sync is unavailable (e.g., Windows/WSL).
+        if (options.manualLoginDefault) {
+          payload!.browserConfig.manualLogin = true;
+          payload!.browserConfig.manualLoginProfileDir = options.manualLoginProfileDir;
+          payload!.browserConfig.keepBrowser = true;
+          if (verbose) {
+            logger(
+              `[serve] Enforcing manual-login profile at ${options.manualLoginProfileDir ?? "default"} for remote run ${runId}`,
+            );
+          }
+        }
+
+        const result = await runBrowser({
+          prompt: payload!.prompt,
+          attachments,
+          config: payload!.browserConfig,
+          log: automationLogger,
+          heartbeatIntervalMs: payload!.options.heartbeatIntervalMs,
+          verbose: payload!.options.verbose,
+        });
+
+        emitEvent(record, { type: "result", seq: 0, result: sanitizeResult(result) }, logger);
+        retireRun(record, "completed", logger);
+        logger(
+          `[serve] Run ${runId} completed in ${Date.now() - runStartedAt}ms (disconnects=${record.totalDisconnects}, events=${record.events.length})`,
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        emitEvent(record, { type: "error", seq: 0, message }, logger);
+        retireRun(record, "errored", logger);
+        logger(
+          `[serve] Run ${runId} failed after ${Date.now() - runStartedAt}ms: ${message} (disconnects=${record.totalDisconnects})`,
+        );
+      } finally {
+        if (activeRunId === runId) {
+          activeRunId = null;
+        }
+        try {
+          await rm(runDir, { recursive: true, force: true });
+        } catch {
+          // ignore cleanup errors
+        }
       }
-    }
+    })();
   });
 
   await new Promise<void>((resolve) => {
@@ -254,15 +450,207 @@ export async function createRemoteServer(
   logger(color(chalk.yellowBright, `Access token: ${authToken}`));
   logger("Leave this terminal running; press Ctrl+C to stop oracle serve.");
 
+  function retireRun(record: RunRecord, status: "completed" | "errored", log: (msg: string) => void) {
+    if (record.status !== "running") return;
+    record.status = status;
+    record.endedAt = Date.now();
+    if (record.gcTimer) {
+      clearTimeout(record.gcTimer);
+    }
+    record.gcTimer = setTimeout(() => {
+      // Drop the buffered events once retention elapses. Active clients are
+      // sent res.end() and removed in the same path.
+      for (const client of record.attachedClients) {
+        try {
+          client.end();
+        } catch {
+          // ignore
+        }
+      }
+      record.attachedClients.clear();
+      runs.delete(record.id);
+      log(
+        `[serve] runId=${record.id} GC'd from buffer (${status}, retained ${completedRetentionMs}ms)`,
+      );
+      const idx = recent.indexOf(record.id);
+      if (idx >= 0) recent.splice(idx, 1);
+    }, completedRetentionMs);
+    record.gcTimer.unref?.();
+  }
+
   return {
     port: address.port,
     token: authToken,
     async close() {
+      // Drain in-flight runs gracefully — close the listener but allow active
+      // runs to finish. Tests rely on close() returning quickly.
       await new Promise<void>((resolve, reject) => {
         server.close((err) => (err ? reject(err) : resolve()));
       });
     },
   };
+}
+
+function attachClient(
+  record: RunRecord,
+  res: http.ServerResponse,
+  cursor: number,
+  logger: (msg: string) => void,
+  onDisconnect: () => void,
+) {
+  // Replay any events with seq > cursor that are already in the buffer, then
+  // register the response so future events stream live. Replay must happen
+  // before registration so we don't double-write a borderline event.
+  const tail = record.events.filter((event) => (event.seq ?? -1) > cursor);
+  for (const event of tail) {
+    try {
+      res.write(`${JSON.stringify(event)}\n`);
+    } catch {
+      // socket already gone — let the close handler clean up
+    }
+  }
+
+  if (record.status !== "running") {
+    // Run already terminated; ensure terminal event is in the tail (it always
+    // is) and close the response so the client doesn't hang.
+    try {
+      res.end();
+    } catch {
+      // ignore
+    }
+    return;
+  }
+
+  record.attachedClients.add(res);
+
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    record.attachedClients.delete(res);
+    onDisconnect();
+  };
+
+  res.on("close", () => {
+    if (!res.writableEnded) {
+      cleanup();
+    }
+  });
+  res.on("finish", () => {
+    record.attachedClients.delete(res);
+  });
+  res.on("error", (err) => {
+    if (record.attachedClients.has(res)) {
+      logger(
+        `[serve] runId=${record.id} client write error: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    cleanup();
+  });
+}
+
+function handleResume(args: {
+  runId: string;
+  cursor: number;
+  runs: Map<string, RunRecord>;
+  res: http.ServerResponse;
+  logger: (msg: string) => void;
+  verbose: boolean;
+  completedRetentionMs: number;
+  retireRun: (record: RunRecord, status: "completed" | "errored", log: (msg: string) => void) => void;
+}) {
+  const { runId, cursor, runs, res, logger, verbose, completedRetentionMs } = args;
+  const record = runs.get(runId);
+  if (!record) {
+    res.writeHead(410, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        error: `runId=${runId} no longer available (server retains completed runs ${completedRetentionMs}ms)`,
+      }),
+    );
+    return;
+  }
+
+  res.writeHead(200, { "Content-Type": "application/x-ndjson" });
+  tuneServerResponseSocket(res);
+
+  if (verbose) {
+    logger(
+      `[serve] runId=${runId} resume from cursor=${cursor} (status=${record.status}, buffered=${record.events.length})`,
+    );
+  } else {
+    logger(`[serve] runId=${runId} resume cursor=${cursor} status=${record.status}`);
+  }
+
+  attachClient(record, res, cursor, logger, () => {
+    record.totalDisconnects += 1;
+    record.lastDisconnectAt = Date.now();
+    logger(
+      `[serve] runId=${runId} resumed client disconnected after ${Date.now() - record.startedAt}ms`,
+    );
+  });
+}
+
+function tuneServerResponseSocket(res: http.ServerResponse) {
+  const sock = res.socket as net.Socket | null | undefined;
+  if (!sock) return;
+  try {
+    sock.setKeepAlive(true, TCP_KEEPALIVE_INITIAL_MS);
+    sock.setNoDelay(true);
+  } catch {
+    // best-effort
+  }
+}
+
+function emitEvent(record: RunRecord, event: RemoteRunEvent, _logger: (msg: string) => void) {
+  const seq = record.nextSeq++;
+  const stamped: RemoteRunEvent = { ...event, seq } as RemoteRunEvent;
+  record.events.push(stamped);
+  const line = `${JSON.stringify(stamped)}\n`;
+  for (const client of record.attachedClients) {
+    try {
+      client.write(line);
+    } catch {
+      // client socket failures are surfaced via the close/error listeners in
+      // attachClient; nothing else to do here.
+    }
+  }
+}
+
+function summarizeRun(record: RunRecord): RemoteRunSummary {
+  return {
+    runId: record.id,
+    status: record.status,
+    startedAt: new Date(record.startedAt).toISOString(),
+    endedAt: record.endedAt ? new Date(record.endedAt).toISOString() : undefined,
+    promptChars: record.promptChars,
+    attachmentCount: record.attachmentCount,
+    eventCount: record.events.length,
+    attachedClients: record.attachedClients.size,
+    totalDisconnects: record.totalDisconnects,
+    lastDisconnectAt: record.lastDisconnectAt
+      ? new Date(record.lastDisconnectAt).toISOString()
+      : undefined,
+    durationMs: record.endedAt ? record.endedAt - record.startedAt : undefined,
+  };
+}
+
+function pruneRecent(
+  newId: string,
+  runs: Map<string, RunRecord>,
+  recent: string[],
+  limit: number,
+) {
+  recent.push(newId);
+  while (recent.length > limit) {
+    const evicted = recent.shift();
+    if (!evicted) break;
+    const record = runs.get(evicted);
+    if (record && record.status !== "running") {
+      if (record.gcTimer) clearTimeout(record.gcTimer);
+      runs.delete(evicted);
+    }
+  }
 }
 
 export async function serveRemote(options: RemoteServerOptions = {}): Promise<void> {

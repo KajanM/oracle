@@ -19,12 +19,37 @@ export interface RemoteRunPayload {
   };
 }
 
+// Each NDJSON event carries a monotonic `seq` so resuming clients can request
+// only events strictly after the last one they observed. `runId` identifies
+// the server-side run and is required to resume after a transport drop.
 export type RemoteRunEvent =
-  | { type: "log"; message: string }
-  | { type: "result"; result: BrowserRunResult }
-  | { type: "error"; message: string };
+  | { type: "runId"; seq: number; runId: string }
+  | { type: "log"; seq: number; message: string }
+  | { type: "result"; seq: number; result: BrowserRunResult }
+  | { type: "error"; seq: number; message: string };
 
 export interface SerializedAttachment extends BrowserAttachment {
   fileName: string;
   contentBase64: string;
+}
+
+export interface RemoteRunSummary {
+  runId: string;
+  status: "running" | "completed" | "errored";
+  startedAt: string;
+  endedAt?: string;
+  promptChars: number;
+  attachmentCount: number;
+  eventCount: number;
+  attachedClients: number;
+  totalDisconnects: number;
+  lastDisconnectAt?: string;
+  durationMs?: number;
+}
+
+export interface RemoteRunsListing {
+  ok: boolean;
+  active: RemoteRunSummary[];
+  recent: RemoteRunSummary[];
+  retentionMs: number;
 }
