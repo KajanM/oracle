@@ -45,8 +45,56 @@ function isTransientError(error: unknown): boolean {
   if (typeof code === "string" && TRANSIENT_ERROR_CODES.has(code)) {
     return true;
   }
-  const message = error instanceof Error ? error.message : String(error);
+  const message = formatRemoteErrorMessage(error);
   return TRANSIENT_ERROR_MESSAGES.some((needle) => message.includes(needle));
+}
+
+export function formatRemoteErrorMessage(error: unknown): string {
+  if (!error) return "Unknown remote transport error.";
+  if (error instanceof AggregateError) {
+    const parts = error.errors
+      .map((entry) => formatRemoteErrorMessage(entry))
+      .filter((entry) => entry.trim().length > 0);
+    const message = error.message.trim();
+    if (parts.length > 0) {
+      return message ? `${message}: ${parts.join("; ")}` : parts.join("; ");
+    }
+    return message || "Unknown aggregate remote transport error.";
+  }
+  if (error instanceof Error) {
+    const details = formatErrorDetails(error);
+    const message = error.message.trim();
+    if (message && details) return `${message} (${details})`;
+    if (message) return message;
+    if (details) return details;
+    return error.name || "Unknown remote transport error.";
+  }
+  return String(error);
+}
+
+function formatErrorDetails(error: Error): string {
+  const fields: string[] = [];
+  const coded = error as {
+    code?: unknown;
+    syscall?: unknown;
+    address?: unknown;
+    port?: unknown;
+    cause?: unknown;
+  };
+  if (typeof coded.code === "string" && coded.code.length > 0) fields.push(coded.code);
+  if (typeof coded.syscall === "string" && coded.syscall.length > 0) {
+    fields.push(`syscall=${coded.syscall}`);
+  }
+  if (typeof coded.address === "string" && coded.address.length > 0) {
+    fields.push(`address=${coded.address}`);
+  }
+  if (typeof coded.port === "number" || typeof coded.port === "string") {
+    fields.push(`port=${coded.port}`);
+  }
+  if (coded.cause && coded.cause !== error) {
+    fields.push(`cause=${formatRemoteErrorMessage(coded.cause)}`);
+  }
+  return fields.join(", ");
 }
 
 function backoffDelayMs(attempt: number): number {
@@ -158,7 +206,7 @@ export function createRemoteBrowserExecutor({ host, token }: RemoteExecutorOptio
         attempt += 1;
         const delay = backoffDelayMs(attempt);
         options.log?.(
-          `[remote] transient transport error: ${error instanceof Error ? error.message : String(error)} — retrying in ${delay}ms`,
+          `[remote] transient transport error: ${formatRemoteErrorMessage(error)} — retrying in ${delay}ms`,
         );
         await sleep(delay);
       }
@@ -167,7 +215,11 @@ export function createRemoteBrowserExecutor({ host, token }: RemoteExecutorOptio
     if (state.resolved) {
       return state.resolved;
     }
-    throw lastError instanceof Error ? lastError : new Error(String(lastError));
+    const finalMessage = formatRemoteErrorMessage(lastError);
+    const prefix = state.runId
+      ? `Remote browser run ${state.runId} failed`
+      : `Unable to connect to remote oracle serve at ${host}`;
+    throw new Error(`${prefix}: ${finalMessage}`);
   };
 }
 
@@ -186,8 +238,23 @@ function streamRun(args: StreamArgs): Promise<void> {
   const { mode, hostname, port, token, body, options, state, idleTimeoutMs } = args;
 
   return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    let activeResponse: http.IncomingMessage | null = null;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      activeResponse?.destroy();
+      resolve();
+    };
+    const fail = (error: unknown) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    };
     const requestPath =
-      mode === "start" ? "/runs" : `/runs/${encodeURIComponent(state.runId!)}/events?cursor=${state.cursor}`;
+      mode === "start"
+        ? "/runs"
+        : `/runs/${encodeURIComponent(state.runId!)}/events?cursor=${state.cursor}`;
     const method = mode === "start" ? "POST" : "GET";
     const headers: Record<string, string | number> = {
       ...(token ? { authorization: `Bearer ${token}` } : {}),
@@ -210,30 +277,31 @@ function streamRun(args: StreamArgs): Promise<void> {
           // Server has GC'd this run; cannot resume — surface as terminal.
           collectError(res)
             .then((message) =>
-              reject(
+              fail(
                 new Error(
                   message ||
                     `Remote run ${state.runId} no longer available (server GC'd before reconnect).`,
                 ),
               ),
             )
-            .catch(reject);
+            .catch(fail);
           return;
         }
         if (res.statusCode === 404 && mode === "resume") {
           collectError(res)
             .then((message) =>
-              reject(new Error(message || `Remote run ${state.runId} not found on host.`)),
+              fail(new Error(message || `Remote run ${state.runId} not found on host.`)),
             )
-            .catch(reject);
+            .catch(fail);
           return;
         }
         if (res.statusCode !== 200) {
           collectError(res)
-            .then((message) => reject(new Error(message)))
-            .catch(reject);
+            .then((message) => fail(new Error(message)))
+            .catch(fail);
           return;
         }
+        activeResponse = res;
 
         // Apply TCP keepalive + nodelay on the underlying socket so dead peers
         // surface within seconds instead of after macOS' default 2-hour idle.
@@ -271,6 +339,10 @@ function streamRun(args: StreamArgs): Promise<void> {
             if (line.length > 0) {
               try {
                 handleEvent(line, options, state);
+                if (state.resolved || state.remoteError) {
+                  finish();
+                  return;
+                }
               } catch (error) {
                 req.destroy(error instanceof Error ? error : new Error(String(error)));
                 return;
@@ -282,12 +354,13 @@ function streamRun(args: StreamArgs): Promise<void> {
 
         res.on("end", () => {
           socket?.off("timeout", onSocketTimeout);
-          resolve();
+          finish();
         });
 
         res.on("error", (err) => {
           socket?.off("timeout", onSocketTimeout);
-          reject(err);
+          if (settled && (state.resolved || state.remoteError)) return;
+          fail(err);
         });
       },
     );
@@ -300,11 +373,12 @@ function streamRun(args: StreamArgs): Promise<void> {
         // ignore — best-effort
       }
     });
-    req.on("error", reject);
+    req.on("error", (error) => {
+      if (settled && (state.resolved || state.remoteError)) return;
+      fail(error);
+    });
     req.setTimeout(idleTimeoutMs, () => {
-      const err: NodeJS.ErrnoException = new Error(
-        `request idle timeout after ${idleTimeoutMs}ms`,
-      );
+      const err: NodeJS.ErrnoException = new Error(`request idle timeout after ${idleTimeoutMs}ms`);
       err.code = "ETIMEDOUT";
       req.destroy(err);
     });
@@ -325,7 +399,11 @@ function handleEvent(line: string, options: BrowserRunOptions, state: StreamStat
       `Failed to parse remote event: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
-  if (typeof event !== "object" || event === null || typeof (event as { type?: unknown }).type !== "string") {
+  if (
+    typeof event !== "object" ||
+    event === null ||
+    typeof (event as { type?: unknown }).type !== "string"
+  ) {
     return;
   }
   if (typeof (event as { seq?: unknown }).seq === "number") {

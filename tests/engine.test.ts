@@ -9,9 +9,9 @@ delete envWithKey.ORACLE_ENGINE;
 delete envWithoutKey.ORACLE_ENGINE;
 
 describe("resolveEngine", () => {
-  it("prefers api when no flags and OPENAI_API_KEY is set", () => {
+  it("defaults to browser even when OPENAI_API_KEY is set", () => {
     const engine = resolveEngine({ engine: undefined, browserFlag: false, env: envWithKey });
-    expect(engine).toBe<EngineMode>("api");
+    expect(engine).toBe<EngineMode>("browser");
   });
 
   it("falls back to browser when no flags and no OPENAI_API_KEY", () => {

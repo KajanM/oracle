@@ -19,20 +19,18 @@ Browser mode lets you use GPT-5.2 Pro without any API keys — it automates your
 
 ### First-time login
 
-Run this once to create an automation profile and log into ChatGPT. The browser will stay open so you can complete the login:
+Sign into ChatGPT in your normal Chrome profile, then let Oracle copy those cookies into its temporary automation profile:
 
 ```bash
-oracle --engine browser --browser-manual-login \
-  --browser-keep-browser --browser-input-timeout 120000 \
-  -p "HI"
+oracle --engine browser -p "HI"
 ```
 
 ### Subsequent runs
 
-Once logged in, the automation profile is saved. Use this for all future runs:
+Keep using browser mode; Oracle reads cookies from the logged-in Chrome profile for each run:
 
 ```bash
-oracle --engine browser --browser-manual-login \
+oracle --engine browser \
   --browser-auto-reattach-delay 5s \
   --browser-auto-reattach-interval 3s \
   --browser-auto-reattach-timeout 60s \
@@ -41,10 +39,7 @@ oracle --engine browser --browser-manual-login \
 
 > **Why these flags?**
 >
-> - `--browser-manual-login` — Skips macOS Keychain cookie access (avoids repeated permission popups)
 > - `--browser-auto-reattach-*` — Reconnects when ChatGPT redirects mid-page-load (fixes "Inspected target navigated or closed" error)
-> - `--browser-keep-browser` — Keeps browser open for first-time login (not needed after)
-> - `--browser-input-timeout 120000` — Gives you 2 minutes to log in on first run
 
 ## Quick start
 
@@ -87,7 +82,7 @@ npx -y @steipete/oracle restart <id>
 npx -y @steipete/oracle tui
 ```
 
-Engine auto-picks API when `OPENAI_API_KEY` is set, otherwise browser; browser is stable on macOS and works on Linux and Windows. On Linux pass `--browser-chrome-path/--browser-cookie-path` if detection fails; on Windows prefer `--browser-manual-login` or inline cookies if decryption is blocked.
+Engine auto-picks API when `OPENAI_API_KEY` is set, otherwise browser; set `engine: "browser"` in config when you always want cookie-backed browser runs. Browser mode uses cookies from an existing logged-in Chrome session. On Linux pass `--browser-chrome-path/--browser-cookie-path` if detection fails.
 
 ## Integration
 
@@ -97,7 +92,7 @@ Engine auto-picks API when `OPENAI_API_KEY` is set, otherwise browser; browser i
 - Gemini browser mode uses Chrome cookies instead of an API key—just be logged into `gemini.google.com` in Chrome (no Python/venv required).
 - If your Gemini account can’t access “Pro”, Oracle auto-falls back to a supported model for web runs (and logs the fallback in verbose mode).
 - Prefer API mode or `--copy` + manual paste; browser automation is experimental.
-- Browser support: stable on macOS; works on Linux (add `--browser-chrome-path/--browser-cookie-path` when needed) and Windows (manual-login or inline cookies recommended when app-bound cookies block decryption).
+- Browser support: stable on macOS; works on Linux (add `--browser-chrome-path/--browser-cookie-path` when needed) and uses cookies from an existing logged-in Chrome profile.
 - Remote browser service: `oracle serve` on a signed-in host; clients use `--remote-host/--remote-token`.
 - AGENTS.md/CLAUDE.md:
   ```
@@ -210,10 +205,9 @@ oracle --engine browser \
 | `--base-url <url>`                                              | Point API runs at LiteLLM/Azure/OpenRouter/etc.                                                                                                                                                                                                                                                                 |
 | `--chatgpt-url <url>`                                           | Target a ChatGPT workspace/folder (browser).                                                                                                                                                                                                                                                                    |
 | `--browser-model-strategy <select\|current\|ignore>`            | Control ChatGPT model selection in browser mode (current keeps the active model; ignore skips the picker).                                                                                                                                                                                                      |
-| `--browser-manual-login`                                        | Skip cookie copy; reuse a persistent automation profile and wait for manual ChatGPT login.                                                                                                                                                                                                                      |
 | `--browser-thinking-time <light\|standard\|extended\|heavy>`    | Set ChatGPT thinking-time intensity (browser; Thinking/Pro models only).                                                                                                                                                                                                                                        |
 | `--browser-port <port>`                                         | Pin the Chrome DevTools port (WSL/Windows firewall helper).                                                                                                                                                                                                                                                     |
-| `--browser-inline-cookies[(-file)] <payload \| path>`          | Supply cookies without Chrome/Keychain (browser).                                                                                                                                                                                                                                                               |
+| `--browser-inline-cookies[(-file)] <payload \| path>`           | Supply cookies without Chrome/Keychain (browser).                                                                                                                                                                                                                                                               |
 | `--browser-timeout`, `--browser-input-timeout`                  | Control overall/browser input timeouts (supports h/m/s/ms).                                                                                                                                                                                                                                                     |
 | `--browser-recheck-delay`, `--browser-recheck-timeout`          | Delayed recheck for long Pro runs: wait then retry capture after timeout (supports h/m/s/ms).                                                                                                                                                                                                                   |
 | `--browser-reuse-wait`                                          | Wait for a shared Chrome profile before launching (parallel browser runs).                                                                                                                                                                                                                                      |
@@ -255,24 +249,26 @@ See [docs/configuration.md](docs/configuration.md) for precedence and full schem
 
 Advanced flags
 
-| Area         | Flags                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Browser      | `--browser-manual-login`, `--browser-thinking-time`, `--browser-timeout`, `--browser-input-timeout`, `--browser-recheck-delay`, `--browser-recheck-timeout`, `--browser-reuse-wait`, `--browser-profile-lock-timeout`, `--browser-auto-reattach-delay`, `--browser-auto-reattach-interval`, `--browser-auto-reattach-timeout`, `--browser-cookie-wait`, `--browser-inline-cookies[(-file)]`, `--browser-attachments`, `--browser-inline-files`, `--browser-bundle-files`, `--browser-keep-browser`, `--browser-headless`, `--browser-hide-window`, `--browser-no-cookie-sync`, `--browser-allow-cookie-errors`, `--browser-chrome-path`, `--browser-cookie-path`, `--chatgpt-url` |
-| Run control  | `--background`, `--no-background`, `--http-timeout`, `--zombie-timeout`, `--zombie-last-activity`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| Azure/OpenAI | `--azure-endpoint`, `--azure-deployment`, `--azure-api-version`, `--base-url`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| Area         | Flags                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Browser      | `--browser-thinking-time`, `--browser-timeout`, `--browser-input-timeout`, `--browser-recheck-delay`, `--browser-recheck-timeout`, `--browser-reuse-wait`, `--browser-profile-lock-timeout`, `--browser-auto-reattach-delay`, `--browser-auto-reattach-interval`, `--browser-auto-reattach-timeout`, `--browser-cookie-wait`, `--browser-inline-cookies[(-file)]`, `--browser-attachments`, `--browser-inline-files`, `--browser-bundle-files`, `--browser-keep-browser`, `--browser-headless`, `--browser-hide-window`, `--browser-no-cookie-sync`, `--browser-allow-cookie-errors`, `--browser-chrome-path`, `--browser-cookie-path`, `--chatgpt-url` |
+| Run control  | `--background`, `--no-background`, `--http-timeout`, `--zombie-timeout`, `--zombie-last-activity`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| Azure/OpenAI | `--azure-endpoint`, `--azure-deployment`, `--azure-api-version`, `--base-url`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 
 Remote browser example
 
 ```bash
-# Host (signed-in Chrome): launch serve
-oracle serve --host 0.0.0.0:9473 --token secret123
+# Host (signed-in macOS Chrome): install a GUI LaunchAgent
+pnpm run build
+scripts/oracle-serve-launchagent.sh install --port 9473 --token secret123
 
 # Client: target that host
 oracle --engine browser --remote-host 192.168.1.10:9473 --remote-token secret123 -p "Run the UI smoke" --file "src/**/*.ts"
-
-# If cookies can’t sync, pass them inline (JSON/base64)
-oracle --engine browser --browser-inline-cookies-file ~/.oracle/cookies.json -p "Run the UI smoke" --file "src/**/*.ts"
 ```
+
+`oracle serve` intentionally reuses cookies from the host's already signed-in Chrome profile.
+On macOS, prefer the LaunchAgent helper so the process runs in the logged-in GUI domain and
+can read Chrome Safe Storage / Keychain; plain SSH shells often cannot.
 
 Session management
 

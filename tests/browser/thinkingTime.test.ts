@@ -25,6 +25,13 @@ describe("browser thinking-time selection expression", () => {
     expect(expression).toContain("pro");
   });
 
+  it("treats the visible Extended Pro composer pill as already selected", () => {
+    const expression = buildThinkingTimeExpressionForTest("extended");
+    expect(expression).toContain("chipMatchesTarget");
+    expect(expression).toContain("already-selected");
+    expect(expression).toContain("chip.textContent");
+  });
+
   it("targets the requested thinking time level", () => {
     const levels = ["light", "standard", "extended", "heavy"] as const;
     for (const level of levels) {

@@ -96,7 +96,134 @@ describe("remote browser service", () => {
       await rm(tmpDir, { recursive: true, force: true });
     },
   );
+
+  test.skipIf(!CAN_LISTEN_LOCALHOST)("rejects runs over the concurrency cap", async () => {
+    const previousCap = process.env.ORACLE_SERVE_MAX_CONCURRENT;
+    process.env.ORACLE_SERVE_MAX_CONCURRENT = "1";
+
+    let releaseRun: (() => void) | undefined;
+    const server = await createRemoteServer(
+      { host: "127.0.0.1", port: 0, token: "secret", logger: () => {} },
+      {
+        runBrowser: async () => {
+          await new Promise<void>((resolve) => {
+            releaseRun = resolve;
+          });
+          return {
+            answerText: "done",
+            answerMarkdown: "done",
+            tookMs: 1000,
+            answerTokens: 1,
+            answerChars: 4,
+          };
+        },
+      },
+    );
+
+    const first = postRun({ port: server.port, token: "secret", prompt: "first" });
+    await waitForActiveRun(server.port);
+
+    const second = await postRun({ port: server.port, token: "secret", prompt: "second" });
+    expect(second.statusCode).toBe(409);
+    expect(second.json?.error).toBe("busy");
+    expect(second.json?.activeRuns).toBe(1);
+    expect(second.json?.maxConcurrentRuns).toBe(1);
+
+    releaseRun?.();
+    const completed = await first;
+    expect(completed.statusCode).toBe(200);
+
+    await server.close();
+    if (previousCap === undefined) {
+      delete process.env.ORACLE_SERVE_MAX_CONCURRENT;
+    } else {
+      process.env.ORACLE_SERVE_MAX_CONCURRENT = previousCap;
+    }
+  });
 });
+
+async function waitForActiveRun(port: number): Promise<void> {
+  const started = Date.now();
+  while (Date.now() - started < 2000) {
+    const health = await httpGetJson({
+      hostname: "127.0.0.1",
+      port,
+      path: "/health",
+      token: "secret",
+    });
+    if (health.json?.activeRuns === 1) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error("remote run did not become active");
+}
+
+async function postRun({
+  port,
+  token,
+  prompt,
+}: {
+  port: number;
+  token: string;
+  prompt: string;
+}): Promise<{ statusCode: number; json: Record<string, unknown> | null }> {
+  return await new Promise((resolve, reject) => {
+    const body = JSON.stringify({
+      prompt,
+      attachments: [],
+      browserConfig: {},
+      options: {},
+    });
+    const req = http.request(
+      {
+        hostname: "127.0.0.1",
+        port,
+        path: "/runs",
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+          "content-length": Buffer.byteLength(body),
+        },
+      },
+      (res) => {
+        res.setEncoding("utf8");
+        let text = "";
+        let settled = false;
+        const settle = () => {
+          if (settled) return;
+          const statusCode = res.statusCode ?? 0;
+          let json: Record<string, unknown> | null = null;
+          const resultLine = text
+            .trim()
+            .split("\n")
+            .findLast((line) => line.trim().length > 0);
+          try {
+            const parsed = resultLine ? JSON.parse(resultLine) : null;
+            json =
+              parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
+          } catch {
+            json = null;
+          }
+          if (statusCode !== 200 || json?.type === "result" || json?.type === "error") {
+            settled = true;
+            resolve({ statusCode, json });
+            res.destroy();
+          }
+        };
+        res.on("data", (chunk: string) => {
+          text += chunk;
+          settle();
+        });
+        res.on("end", () => {
+          if (!settled) settle();
+        });
+      },
+    );
+    req.on("error", reject);
+    req.write(body);
+    req.end();
+  });
+}
 
 async function httpGetJson({
   hostname,

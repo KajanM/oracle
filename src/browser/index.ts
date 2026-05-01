@@ -133,6 +133,12 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
       })}`,
     );
   }
+  config = {
+    ...config,
+    manualLogin: false,
+    manualLoginProfileDir: null,
+    manualLoginCookieSync: false,
+  };
 
   if (!config.remoteChrome && !config.manualLogin) {
     const preferredPort = config.debugPort ?? DEFAULT_DEBUG_PORT;
@@ -158,20 +164,9 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
     return runRemoteBrowserMode(promptText, attachments, config, logger, options);
   }
 
-  const manualLogin = Boolean(config.manualLogin);
-  const manualProfileDir = config.manualLoginProfileDir
-    ? path.resolve(config.manualLoginProfileDir)
-    : path.join(os.homedir(), ".oracle", "browser-profile");
-  const userDataDir = manualLogin
-    ? manualProfileDir
-    : await mkdtemp(path.join(await resolveUserDataBaseDir(), "oracle-browser-"));
-  if (manualLogin) {
-    // Learned: manual login reuses a persistent profile so cookies/SSO survive.
-    await mkdir(userDataDir, { recursive: true });
-    logger(`Manual login mode enabled; reusing persistent profile at ${userDataDir}`);
-  } else {
-    logger(`Created temporary Chrome profile at ${userDataDir}`);
-  }
+  const manualLogin = false;
+  const userDataDir = await mkdtemp(path.join(await resolveUserDataBaseDir(), "oracle-browser-"));
+  logger(`Created temporary Chrome profile at ${userDataDir}`);
 
   const effectiveKeepBrowser = Boolean(config.keepBrowser);
   const chromeStartMs = Date.now();
@@ -350,7 +345,7 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
       // Fail early so the user knows to sign in.
       throw new BrowserAutomationError(
         "No ChatGPT cookies were applied from your Chrome profile; cannot proceed in browser mode. " +
-          "Make sure ChatGPT is signed in in the selected profile, use --browser-manual-login / inline cookies, " +
+          "Make sure ChatGPT is signed in in the selected profile, use inline cookies, " +
           "or retry with --browser-cookie-wait 5s if Keychain prompts are slow.",
         {
           stage: "execute-browser",
@@ -485,7 +480,7 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
     await captureRuntimeSnapshot();
     const modelStartMs = Date.now();
     const modelStrategy = config.modelStrategy ?? DEFAULT_MODEL_STRATEGY;
-    if (config.desiredModel && modelStrategy !== "ignore") {
+    if (config.desiredModel && modelStrategy === "select") {
       await bringPageToFront();
       await raceWithDisconnect(
         withRetries(
@@ -523,8 +518,8 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
       logger(
         `Prompt textarea ready (after model switch, ${promptText.length.toLocaleString()} chars queued)`,
       );
-    } else if (modelStrategy === "ignore") {
-      logger("[browser] [phase] model-select — skipped (strategy=ignore)");
+    } else if (modelStrategy === "ignore" || modelStrategy === "current") {
+      logger(`[browser] [phase] model-select — skipped (strategy=${modelStrategy})`);
     }
     logger(
       `[browser] [phase] model-select — ${Date.now() - modelStartMs}ms model=${config.desiredModel ?? "default"} strategy=${modelStrategy}`,
@@ -1087,18 +1082,13 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
         tabUrl: lastUrl,
         controllerPid: process.pid,
       };
-      const reuseProfileHint =
-        `oracle --engine browser --browser-manual-login ` +
-        `--browser-manual-login-profile-dir ${JSON.stringify(userDataDir)}`;
       await emitRuntimeHint();
       logger("Cloudflare challenge detected; leaving browser open so you can complete the check.");
-      logger(`Reuse this browser profile with: ${reuseProfileHint}`);
       throw new BrowserAutomationError(
         "Cloudflare challenge detected. Complete the “Just a moment…” check in the open browser, then rerun.",
         {
           stage: "cloudflare-challenge",
           runtime,
-          reuseProfileHint,
         },
         normalizedError,
       );
@@ -1519,7 +1509,7 @@ async function runRemoteBrowserMode(
     }
 
     const modelStrategy = config.modelStrategy ?? DEFAULT_MODEL_STRATEGY;
-    if (config.desiredModel && modelStrategy !== "ignore") {
+    if (config.desiredModel && modelStrategy === "select") {
       await bringPageToFront();
       await withRetries(
         () =>
@@ -1548,8 +1538,8 @@ async function runRemoteBrowserMode(
       logger(
         `Prompt textarea ready (after model switch, ${promptText.length.toLocaleString()} chars queued)`,
       );
-    } else if (modelStrategy === "ignore") {
-      logger("Model picker: skipped (strategy=ignore)");
+    } else if (modelStrategy === "ignore" || modelStrategy === "current") {
+      logger(`Model picker: skipped (strategy=${modelStrategy})`);
     }
     // Handle thinking time selection if specified
     const thinkingTime = config.thinkingTime;

@@ -166,7 +166,7 @@ export function summarizeModelRunsForConsult(
 
 export function buildConsultBrowserConfig({
   userConfig,
-  env,
+  env: _env,
   runModel,
   inputModel,
   browserModelLabel,
@@ -184,8 +184,6 @@ export function buildConsultBrowserConfig({
   browserConversationUrl?: string;
 }): BrowserSessionConfig {
   const configuredBrowser = userConfig.browser ?? {};
-  const envProfileDir = (env.ORACLE_BROWSER_PROFILE_DIR ?? "").trim();
-  const hasProfileDir = envProfileDir.length > 0;
   const preferredLabel = (browserModelLabel ?? inputModel)?.trim();
   const isChatGptModel = runModel.startsWith("gpt-") && !runModel.includes("codex");
   const desiredModelLabel = isChatGptModel
@@ -196,20 +194,18 @@ export function buildConsultBrowserConfig({
     requestedConversationUrl && requestedConversationUrl.length > 0
       ? requestedConversationUrl
       : (configuredBrowser.chatgptUrl ?? configuredBrowser.url ?? CHATGPT_URL);
-  const manualLogin = hasProfileDir ? true : (configuredBrowser.manualLogin ?? false);
 
   return {
     ...configuredBrowser,
     url: configuredUrl,
     chatgptUrl: configuredUrl,
-    cookieSync: !manualLogin,
+    cookieSync: true,
     headless: configuredBrowser.headless ?? false,
     hideWindow: configuredBrowser.hideWindow ?? false,
     keepBrowser: browserKeepBrowser ?? configuredBrowser.keepBrowser ?? false,
-    manualLogin,
-    manualLoginProfileDir: manualLogin
-      ? ((envProfileDir || configuredBrowser.manualLoginProfileDir) ?? null)
-      : null,
+    manualLogin: false,
+    manualLoginProfileDir: null,
+    manualLoginCookieSync: false,
     thinkingTime: browserThinkingTime ?? configuredBrowser.thinkingTime,
     desiredModel: desiredModelLabel || mapModelToBrowserLabel(runModel),
   };

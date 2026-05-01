@@ -18,13 +18,6 @@ import type {
 import { getCookies, type Cookie } from "@steipete/sweet-cookie";
 import { CHATGPT_URL } from "../browser/constants.js";
 import { getCliVersion } from "../version.js";
-import {
-  cleanupStaleProfileState,
-  readDevToolsPort,
-  verifyDevToolsReachable,
-  writeChromePid,
-  writeDevToolsActivePort,
-} from "../browser/profileState.js";
 import { normalizeChatgptUrl } from "../browser/utils.js";
 
 export interface RemoteServerOptions {
@@ -32,8 +25,6 @@ export interface RemoteServerOptions {
   port?: number;
   token?: string;
   logger?: (message: string) => void;
-  manualLoginDefault?: boolean;
-  manualLoginProfileDir?: string;
   // Tier 2 knobs — defaults are reasonable for a single-user remote.
   completedRunRetentionMs?: number;
   recentRunsLimit?: number;
@@ -75,22 +66,6 @@ interface RunRecord {
   nextSeq: number;
 }
 
-async function findAvailablePort(): Promise<number> {
-  return await new Promise<number>((resolve, reject) => {
-    const srv = net.createServer();
-    srv.on("error", (err) => reject(err));
-    srv.listen(0, () => {
-      const address = srv.address();
-      if (typeof address === "object" && address?.port) {
-        const port = address.port;
-        srv.close(() => resolve(port));
-      } else {
-        srv.close(() => reject(new Error("Unable to allocate port")));
-      }
-    });
-  });
-}
-
 export async function createRemoteServer(
   options: RemoteServerOptions = {},
   deps: RemoteServerDeps = {},
@@ -115,11 +90,17 @@ export async function createRemoteServer(
   const runs = new Map<string, RunRecord>();
   const recent: string[] = [];
 
-  // Single-flight guard: remote Chrome can only host one run at a time, so we
-  // queue/reject overlapping requests. Disconnect alone does NOT free the slot
-  // — only run completion does. This is the key contract change vs. the old
-  // boolean `busy` guard.
-  let activeRunId: string | null = null;
+  // Bounded concurrency: each run gets its own ephemeral Chrome profile and CDP
+  // port, but the ChatGPT account is shared. Keep fan-out explicit and small.
+  const maxConcurrentRuns = (() => {
+    const raw = process.env.ORACLE_SERVE_MAX_CONCURRENT;
+    if (raw) {
+      const parsed = Number.parseInt(raw, 10);
+      if (Number.isFinite(parsed) && parsed > 0) return parsed;
+    }
+    return 5;
+  })();
+  const activeRunIds = new Set<string>();
 
   if (!process.listenerCount("unhandledRejection")) {
     process.on("unhandledRejection", (reason) => {
@@ -170,8 +151,9 @@ export async function createRemoteServer(
           ok: true,
           version: getCliVersion(),
           uptimeSeconds: Math.round((Date.now() - startedAt) / 1000),
-          activeRunId,
-          activeRuns: activeRunId ? 1 : 0,
+          activeRuns: activeRunIds.size,
+          maxConcurrentRuns,
+          activeRunIds: Array.from(activeRunIds),
           retainedRuns: runs.size,
         }),
       );
@@ -236,9 +218,7 @@ export async function createRemoteServer(
 
     // POST /runs/:id/cancel — explicit cancellation of an in-flight run.
     const cancelMatch =
-      req.method === "POST" && req.url
-        ? /^\/runs\/([^/?]+)\/cancel$/.exec(req.url)
-        : null;
+      req.method === "POST" && req.url ? /^\/runs\/([^/?]+)\/cancel$/.exec(req.url) : null;
     if (cancelMatch) {
       const authHeader = req.headers.authorization ?? "";
       if (authHeader !== `Bearer ${authToken}`) {
@@ -286,14 +266,21 @@ export async function createRemoteServer(
       res.end(JSON.stringify({ error: "unauthorized" }));
       return;
     }
-    if (activeRunId) {
+    if (activeRunIds.size >= maxConcurrentRuns) {
       if (verbose) {
         logger(
-          `[serve] Busy: rejecting new run from ${formatSocket(req)} while runId=${activeRunId} is active`,
+          `[serve] Busy: rejecting new run from ${formatSocket(req)} (active=${activeRunIds.size}/${maxConcurrentRuns}, ids=[${Array.from(activeRunIds).join(",")}])`,
         );
       }
       res.writeHead(409, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "busy", activeRunId }));
+      res.end(
+        JSON.stringify({
+          error: "busy",
+          activeRuns: activeRunIds.size,
+          maxConcurrentRuns,
+          activeRunIds: Array.from(activeRunIds),
+        }),
+      );
       return;
     }
 
@@ -311,7 +298,7 @@ export async function createRemoteServer(
     }
 
     const runId = randomUUID();
-    activeRunId = runId;
+    activeRunIds.add(runId);
     const runStartedAt = Date.now();
     const promptChars = payload?.prompt?.length ?? 0;
     const attachmentCount = Array.isArray(payload.attachments) ? payload.attachments.length : 0;
@@ -371,12 +358,23 @@ export async function createRemoteServer(
         }
 
         // Reuse the existing browser logger surface so clients see the same log stream.
+        // Optionally mirror run logs into the host process log for LaunchAgent/tmux diagnostics.
+        const mirrorRunLogs =
+          process.env.ORACLE_SERVE_LOG_RUNS === "1" || process.env.ORACLE_SERVE_VERBOSE === "1";
         const automationLogger: BrowserLogger = ((message?: string) => {
           if (typeof message === "string") {
             emitEvent(record, { type: "log", seq: 0, message }, logger);
+            if (mirrorRunLogs) {
+              logger(`[serve:${runId.slice(0, 8)}] ${message}`);
+            }
           }
         }) as BrowserLogger;
-        automationLogger.verbose = Boolean(payload!.options.verbose);
+        automationLogger.verbose = mirrorRunLogs ? true : Boolean(payload!.options.verbose);
+        if (mirrorRunLogs) {
+          logger(
+            `[serve] Run ${runId} payload: prompt=${payload!.prompt.length} chars, attachments=${payload!.attachments?.length ?? 0}, verbose(client)=${Boolean(payload!.options.verbose)}, browserConfig keys=[${Object.keys(payload!.browserConfig ?? {}).join(",")}]`,
+          );
+        }
 
         // Remote runs always rely on the host's own Chrome profile; ignore any inline cookie transfer.
         const activePayload = payload!;
@@ -388,17 +386,9 @@ export async function createRemoteServer(
           activePayload.browserConfig = {} as typeof activePayload.browserConfig;
         }
 
-        // Enforce manual-login profile when cookie sync is unavailable (e.g., Windows/WSL).
-        if (options.manualLoginDefault) {
-          payload!.browserConfig.manualLogin = true;
-          payload!.browserConfig.manualLoginProfileDir = options.manualLoginProfileDir;
-          payload!.browserConfig.keepBrowser = true;
-          if (verbose) {
-            logger(
-              `[serve] Enforcing manual-login profile at ${options.manualLoginProfileDir ?? "default"} for remote run ${runId}`,
-            );
-          }
-        }
+        payload!.browserConfig.manualLogin = false;
+        payload!.browserConfig.manualLoginProfileDir = null;
+        payload!.browserConfig.manualLoginCookieSync = false;
 
         const result = await runBrowser({
           prompt: payload!.prompt,
@@ -422,9 +412,7 @@ export async function createRemoteServer(
           `[serve] Run ${runId} failed after ${Date.now() - runStartedAt}ms: ${message} (disconnects=${record.totalDisconnects})`,
         );
       } finally {
-        if (activeRunId === runId) {
-          activeRunId = null;
-        }
+        activeRunIds.delete(runId);
         try {
           await rm(runDir, { recursive: true, force: true });
         } catch {
@@ -450,7 +438,11 @@ export async function createRemoteServer(
   logger(color(chalk.yellowBright, `Access token: ${authToken}`));
   logger("Leave this terminal running; press Ctrl+C to stop oracle serve.");
 
-  function retireRun(record: RunRecord, status: "completed" | "errored", log: (msg: string) => void) {
+  function retireRun(
+    record: RunRecord,
+    status: "completed" | "errored",
+    log: (msg: string) => void,
+  ) {
     if (record.status !== "running") return;
     record.status = status;
     record.endedAt = Date.now();
@@ -557,7 +549,11 @@ function handleResume(args: {
   logger: (msg: string) => void;
   verbose: boolean;
   completedRetentionMs: number;
-  retireRun: (record: RunRecord, status: "completed" | "errored", log: (msg: string) => void) => void;
+  retireRun: (
+    record: RunRecord,
+    status: "completed" | "errored",
+    log: (msg: string) => void,
+  ) => void;
 }) {
   const { runId, cursor, runs, res, logger, verbose, completedRetentionMs } = args;
   const record = runs.get(runId);
@@ -635,12 +631,7 @@ function summarizeRun(record: RunRecord): RemoteRunSummary {
   };
 }
 
-function pruneRecent(
-  newId: string,
-  runs: Map<string, RunRecord>,
-  recent: string[],
-  limit: number,
-) {
+function pruneRecent(newId: string, runs: Map<string, RunRecord>, recent: string[], limit: number) {
   recent.push(newId);
   while (recent.length > limit) {
     const evicted = recent.shift();
@@ -654,9 +645,6 @@ function pruneRecent(
 }
 
 export async function serveRemote(options: RemoteServerOptions = {}): Promise<void> {
-  const manualProfileDir =
-    options.manualLoginProfileDir ?? path.join(os.homedir(), ".oracle", "browser-profile");
-  const preferManualLogin = options.manualLoginDefault || process.platform === "win32" || isWsl();
   let cookies: CookieParam[] | null = null;
   let opened = false;
 
@@ -673,40 +661,14 @@ export async function serveRemote(options: RemoteServerOptions = {}): Promise<vo
     return;
   }
 
-  if (!preferManualLogin) {
-    // Warm-up: ensure this host has a ChatGPT login before accepting runs.
-    const result = await loadLocalChatgptCookies(console.log, CHATGPT_URL);
-    cookies = result.cookies;
-    opened = result.opened;
-  }
+  // Warm-up: ensure this host has a ChatGPT login before accepting runs.
+  const result = await loadLocalChatgptCookies(console.log, CHATGPT_URL);
+  cookies = result.cookies;
+  opened = result.opened;
 
   if (!cookies || cookies.length === 0) {
     console.log("No ChatGPT cookies detected on this host.");
-    if (preferManualLogin) {
-      await mkdir(manualProfileDir, { recursive: true });
-      console.log(
-        `Cookie extraction is unavailable on this platform. Using manual-login Chrome profile at ${manualProfileDir}. Remote runs will reuse this profile; sign in once when the browser opens.`,
-      );
-      const existingPort = await readDevToolsPort(manualProfileDir);
-      if (existingPort) {
-        const reachable = await verifyDevToolsReachable({ port: existingPort });
-        if (reachable.ok) {
-          console.log(
-            "Detected an existing automation Chrome session; will reuse it for manual login.",
-          );
-        } else {
-          console.log(
-            `Found stale DevToolsActivePort (port ${existingPort}, ${reachable.error}); launching a fresh manual-login Chrome.`,
-          );
-          await cleanupStaleProfileState(manualProfileDir, console.log, {
-            lockRemovalMode: "never",
-          });
-          void launchManualLoginChrome(manualProfileDir, CHATGPT_URL, console.log);
-        }
-      } else {
-        void launchManualLoginChrome(manualProfileDir, CHATGPT_URL, console.log);
-      }
-    } else if (opened) {
+    if (opened) {
       console.log(
         "Opened chatgpt.com for login. Sign in, then restart `oracle serve` to continue.",
       );
@@ -728,8 +690,6 @@ export async function serveRemote(options: RemoteServerOptions = {}): Promise<vo
 
   const server = await createRemoteServer({
     ...options,
-    manualLoginDefault: preferManualLogin,
-    manualLoginProfileDir: manualProfileDir,
   });
   await new Promise<void>((resolve) => {
     const shutdown = () => {
@@ -962,71 +922,5 @@ function canSpawn(cmd: string): boolean {
     return whichResult.status === 0;
   } catch {
     return false;
-  }
-}
-
-async function launchManualLoginChrome(
-  profileDir: string,
-  url: string,
-  logger: (msg: string) => void,
-): Promise<void> {
-  const timeoutMs = 7000;
-  let finished = false;
-  const timeout = setTimeout(() => {
-    if (!finished) {
-      logger(
-        `Timed out launching Chrome for manual login. Launch Chrome manually with --user-data-dir=${profileDir} and log in to ${url}.`,
-      );
-    }
-  }, timeoutMs);
-
-  try {
-    const chromeLauncher = await import("chrome-launcher");
-    const { launch } = chromeLauncher;
-    const debugPort = await findAvailablePort();
-    logger(`Planned manual-login Chrome DevTools port: ${debugPort}`);
-    const chrome = await launch({
-      // Expose DevTools so later runs can attach instead of spawning a second Chrome.
-      // Use a per-serve free port so the login window stays stable for all runs.
-      port: debugPort,
-      userDataDir: profileDir,
-      startingUrl: url,
-      chromeFlags: [
-        "--no-first-run",
-        "--no-default-browser-check",
-        `--user-data-dir=${profileDir}`,
-        "--remote-allow-origins=*",
-        `--remote-debugging-port=${debugPort}`, // ensure DevToolsActivePort is written even on Windows
-      ],
-    });
-
-    const chosenPort = chrome?.port ?? debugPort ?? null;
-    if (chosenPort) {
-      // Persist DevToolsActivePort eagerly so future runs can attach/reuse this Chrome.
-      await writeDevToolsActivePort(profileDir, chosenPort);
-      if (chrome?.pid) {
-        await writeChromePid(profileDir, chrome.pid);
-      }
-      logger(`Manual-login Chrome DevTools port: ${chosenPort}`);
-      logger(`If needed, DevTools JSON at http://127.0.0.1:${chosenPort}/json/version`);
-    } else {
-      logger(
-        "Warning: unable to determine manual-login Chrome DevTools port. Remote runs may fail to attach.",
-      );
-    }
-
-    finished = true;
-    clearTimeout(timeout);
-    const portInfo = chosenPort ? ` (DevTools port ${chosenPort})` : "";
-    logger(
-      `Opened Chrome with manual-login profile at ${profileDir}${portInfo}. Complete login, then rerun remote sessions.`,
-    );
-  } catch (error) {
-    finished = true;
-    clearTimeout(timeout);
-    const message = error instanceof Error ? error.message : String(error);
-    logger(
-      `Unable to open Chrome for manual login (${message}). Launch Chrome manually with --user-data-dir=${profileDir} and log in to ${url}.`,
-    );
   }
 }

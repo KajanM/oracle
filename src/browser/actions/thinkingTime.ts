@@ -148,6 +148,14 @@ function buildThinkingTimeExpression(level: ThinkingTimeLevel): string {
       heavy: ['heavy'],
     }[TARGET_LEVEL] ?? [TARGET_LEVEL];
 
+    const chipMatchesTarget = (btn) => {
+      const aria = normalize(btn.getAttribute?.('aria-label') ?? '');
+      const text = normalize(btn.textContent ?? '');
+      const combined = [aria, text].filter(Boolean).join(' ');
+      if (!combined) return false;
+      return targetAliases.some((label) => combined.includes(label));
+    };
+
     const findThinkingChip = () => {
       for (const selector of CHIP_SELECTORS) {
         const buttons = document.querySelectorAll(selector);
@@ -168,6 +176,9 @@ function buildThinkingTimeExpression(level: ThinkingTimeLevel): string {
     const chip = findThinkingChip();
     if (!chip) {
       return { status: 'chip-not-found' };
+    }
+    if (chipMatchesTarget(chip)) {
+      return { status: 'already-selected', label: chip.textContent?.trim?.() || null };
     }
 
     dispatchClickSequence(chip);

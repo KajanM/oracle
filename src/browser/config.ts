@@ -2,8 +2,6 @@ import { CHATGPT_URL, DEFAULT_MODEL_STRATEGY, DEFAULT_MODEL_TARGET } from "./con
 import { normalizeBrowserModelStrategy } from "./modelStrategy.js";
 import type { BrowserAutomationConfig, ResolvedBrowserConfig } from "./types.js";
 import { isTemporaryChatUrl, normalizeChatgptUrl } from "./utils.js";
-import os from "node:os";
-import path from "node:path";
 
 export const DEFAULT_BROWSER_CONFIG: ResolvedBrowserConfig = {
   chromeProfile: null,
@@ -69,14 +67,6 @@ export function resolveBrowserConfig(
         'Remove "temporary-chat=true" from your browser URL, or use a non-Pro model label (e.g. "GPT-5.2").',
     );
   }
-  const isWindows = process.platform === "win32";
-  const manualLogin =
-    config?.manualLogin ?? (isWindows ? true : DEFAULT_BROWSER_CONFIG.manualLogin);
-  const cookieSyncDefault = isWindows ? false : DEFAULT_BROWSER_CONFIG.cookieSync;
-  const resolvedProfileDir =
-    config?.manualLoginProfileDir ??
-    process.env.ORACLE_BROWSER_PROFILE_DIR ??
-    path.join(os.homedir(), ".oracle", "browser-profile");
   return {
     ...DEFAULT_BROWSER_CONFIG,
     ...config,
@@ -97,7 +87,7 @@ export function resolveBrowserConfig(
       config?.autoReattachIntervalMs ?? DEFAULT_BROWSER_CONFIG.autoReattachIntervalMs,
     autoReattachTimeoutMs:
       config?.autoReattachTimeoutMs ?? DEFAULT_BROWSER_CONFIG.autoReattachTimeoutMs,
-    cookieSync: config?.cookieSync ?? cookieSyncDefault,
+    cookieSync: config?.cookieSync ?? DEFAULT_BROWSER_CONFIG.cookieSync,
     cookieNames: config?.cookieNames ?? DEFAULT_BROWSER_CONFIG.cookieNames,
     cookieSyncWaitMs: config?.cookieSyncWaitMs ?? DEFAULT_BROWSER_CONFIG.cookieSyncWaitMs,
     inlineCookies: config?.inlineCookies ?? DEFAULT_BROWSER_CONFIG.inlineCookies,
@@ -114,10 +104,9 @@ export function resolveBrowserConfig(
     allowCookieErrors:
       config?.allowCookieErrors ?? envAllowCookieErrors ?? DEFAULT_BROWSER_CONFIG.allowCookieErrors,
     thinkingTime: config?.thinkingTime,
-    manualLogin,
-    manualLoginProfileDir: manualLogin ? resolvedProfileDir : null,
-    manualLoginCookieSync:
-      config?.manualLoginCookieSync ?? DEFAULT_BROWSER_CONFIG.manualLoginCookieSync,
+    manualLogin: false,
+    manualLoginProfileDir: null,
+    manualLoginCookieSync: false,
   };
 }
 

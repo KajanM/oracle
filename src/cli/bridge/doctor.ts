@@ -94,7 +94,7 @@ export async function runBridgeDoctor(_options: BridgeDoctorCliOptions): Promise
 
     if (process.platform === "win32") {
       warn.push(
-        "Cookie sync is disabled on Windows; use --browser-manual-login or run browser automation on another host.",
+        "Cookie sync may be blocked on Windows; run browser automation on a host where Chrome cookies can be read.",
       );
       lines.push(chalk.dim("Cookies: (cookie sync disabled on Windows)"));
     } else {
@@ -103,7 +103,7 @@ export async function runBridgeDoctor(_options: BridgeDoctorCliOptions): Promise
         lines.push(chalk.dim(`Cookies DB: ${chalk.green(cookieDb)}`));
       } else {
         warn.push(
-          "Chrome cookies DB not detected. You may need --browser-cookie-path or --browser-manual-login.",
+          "Chrome cookies DB not detected. You may need --browser-cookie-path or a logged-in Chrome profile.",
         );
         lines.push(chalk.dim(`Cookies DB: ${chalk.yellow("not found")}`));
       }

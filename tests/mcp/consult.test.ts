@@ -57,11 +57,11 @@ describe("summarizeModelRunsForConsult", () => {
       url: "https://chatgpt.com/g/g-p-foo/project",
       debugPort: 9224,
       keepBrowser: true,
-      manualLogin: true,
-      manualLoginProfileDir: "/tmp/oracle-profile",
+      manualLogin: false,
+      manualLoginProfileDir: null,
       thinkingTime: "extended",
       desiredModel: "Auto",
-      cookieSync: false,
+      cookieSync: true,
     });
   });
 
@@ -87,11 +87,11 @@ describe("summarizeModelRunsForConsult", () => {
 
     expect(config).toMatchObject({
       keepBrowser: true,
-      manualLogin: true,
-      manualLoginProfileDir: "/tmp/env-profile",
+      manualLogin: false,
+      manualLoginProfileDir: null,
       thinkingTime: "heavy",
       desiredModel: "Claude Sonnet",
-      cookieSync: false,
+      cookieSync: true,
     });
   });
 });

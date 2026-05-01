@@ -139,8 +139,6 @@ interface CliOptions extends OptionValues {
   browserHideWindow?: boolean;
   browserKeepBrowser?: boolean;
   browserModelStrategy?: "select" | "current" | "ignore";
-  browserManualLogin?: boolean;
-  browserManualLoginProfileDir?: string;
   browserThinkingTime?: "light" | "standard" | "extended" | "heavy";
   browserAllowCookieErrors?: boolean;
   browserAttachments?: string;
@@ -505,7 +503,7 @@ program
   .addOption(
     new Option(
       "--browser-profile-lock-timeout <ms|s|m|h>",
-      "Wait for the shared manual-login profile lock before sending (serializes parallel runs).",
+      "Wait for the shared browser profile lock before sending (serializes parallel runs).",
     ).hideHelp(),
   )
   .addOption(
@@ -562,12 +560,6 @@ program
     ).hideHelp(),
   )
   .addOption(new Option("--browser-no-cookie-sync", "Skip copying cookies from Chrome.").hideHelp())
-  .addOption(
-    new Option(
-      "--browser-manual-login",
-      "Skip cookie copy; reuse a persistent automation profile and wait for manual ChatGPT login.",
-    ).hideHelp(),
-  )
   .addOption(new Option("--browser-headless", "Launch Chrome in headless mode.").hideHelp())
   .addOption(
     new Option(
@@ -712,23 +704,12 @@ program
   .option("--host <address>", "Interface to bind (default 0.0.0.0).")
   .option("--port <number>", "Port to listen on (default random).", parseIntOption)
   .option("--token <value>", "Access token clients must provide (random if omitted).")
-  .option(
-    "--manual-login",
-    "Use a dedicated Chrome profile for manual login (recommended when cookie sync is unavailable).",
-    false,
-  )
-  .option(
-    "--manual-login-profile-dir <path>",
-    "Chrome profile directory for manual login (default ~/.oracle/browser-profile).",
-  )
   .action(async (commandOptions) => {
     const { serveRemote } = await import("../src/remote/server.js");
     await serveRemote({
       host: commandOptions.host,
       port: commandOptions.port,
       token: commandOptions.token,
-      manualLoginDefault: commandOptions.manualLogin,
-      manualLoginProfileDir: commandOptions.manualLoginProfileDir,
     });
   });
 
@@ -2124,7 +2105,7 @@ function printDebugHelp(cliName: string): void {
     ],
     [
       "--browser-profile-lock-timeout <ms|s|m|h>",
-      "Wait for the manual-login profile lock before sending.",
+      "Wait for the browser profile lock before sending.",
     ],
     [
       "--browser-auto-reattach-delay <ms|s|m|h>",
@@ -2140,10 +2121,6 @@ function printDebugHelp(cliName: string): void {
       "Wait before retrying cookie sync when Chrome cookies are empty or locked.",
     ],
     ["--browser-no-cookie-sync", "Skip copying cookies from your main profile."],
-    [
-      "--browser-manual-login",
-      "Skip cookie copy; reuse a persistent automation profile and log in manually.",
-    ],
     ["--browser-headless", "Launch Chrome in headless mode."],
     ["--browser-hide-window", "Hide the Chrome window (macOS headful only)."],
     ["--browser-keep-browser", "Leave Chrome running after completion."],
