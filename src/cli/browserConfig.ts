@@ -85,31 +85,8 @@ export function normalizeChatGptModelForBrowser(model: ModelName): ModelName {
     return model;
   }
 
-  if (normalized === "gpt-5.5-pro" || normalized === "gpt-5.5" || normalized === "gpt-5.4") {
-    return normalized;
-  }
-
-  // Pro variants: resolve to the latest Pro model in ChatGPT.
-  if (
-    normalized === "gpt-5.4-pro" ||
-    normalized === "gpt-5-pro" ||
-    normalized === "gpt-5.1-pro" ||
-    normalized === "gpt-5.2-pro"
-  ) {
-    return "gpt-5.5-pro";
-  }
-
-  // Explicit model variants: keep as-is (they have their own browser labels)
-  if (normalized === "gpt-5.2-thinking" || normalized === "gpt-5.2-instant") {
-    return normalized;
-  }
-
-  // Legacy aliases: map to base GPT-5.2 (Auto)
-  if (normalized === "gpt-5.1") {
-    return "gpt-5.2";
-  }
-
-  return model;
+  // Browser GPT runs are intentionally pinned to ChatGPT Latest / Pro.
+  return "gpt-5.5-pro";
 }
 
 export async function buildBrowserConfig(
@@ -121,8 +98,9 @@ export async function buildBrowserConfig(
   const isChatGptModel = baseModel.startsWith("gpt-") && !baseModel.includes("codex");
   const shouldUseOverride =
     !isChatGptModel && normalizedOverride.length > 0 && normalizedOverride !== baseModel;
-  const modelStrategy =
+  const requestedModelStrategy =
     normalizeBrowserModelStrategy(options.browserModelStrategy) ?? DEFAULT_MODEL_STRATEGY;
+  const modelStrategy = isChatGptModel ? "select" : requestedModelStrategy;
   const cookieNames = parseCookieNames(
     options.browserCookieNames ?? process.env.ORACLE_BROWSER_COOKIE_NAMES,
   );
@@ -150,10 +128,9 @@ export async function buildBrowserConfig(
       ? desiredModelOverride
       : mapModelToBrowserLabel(options.model);
   const thinkingTime =
-    options.browserThinkingTime ??
-    (modelStrategy === "select" && shouldForceProComposerMode(desiredModel)
+    isChatGptModel || (modelStrategy === "select" && shouldForceProComposerMode(desiredModel))
       ? "extended"
-      : undefined);
+      : options.browserThinkingTime;
 
   if (
     modelStrategy === "select" &&
@@ -248,6 +225,9 @@ export function mapModelToBrowserLabel(model: ModelName): string {
 }
 
 export function resolveBrowserModelLabel(input: string | undefined, model: ModelName): string {
+  if (model.toLowerCase().startsWith("gpt-") && !model.toLowerCase().includes("codex")) {
+    return mapModelToBrowserLabel(model);
+  }
   const trimmed = input?.trim?.() ?? "";
   if (!trimmed) {
     return mapModelToBrowserLabel(model);

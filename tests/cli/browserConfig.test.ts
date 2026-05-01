@@ -22,27 +22,29 @@ describe("buildBrowserConfig", () => {
     });
   });
 
-  test("maps gpt-5.4 browser runs to Thinking 5.4", async () => {
+  test("maps gpt browser runs to latest Pro", async () => {
     const config = await buildBrowserConfig({ model: "gpt-5.4" });
-    expect(config.desiredModel).toBe("Thinking");
+    expect(config.desiredModel).toBe("Use latest model");
+    expect(config.thinkingTime).toBe("extended");
   });
 
-  test("sets model strategy when provided", async () => {
+  test("forces model selection and extended thinking for GPT browser runs", async () => {
     const config = await buildBrowserConfig({
       model: "gpt-5.2-pro",
       browserModelStrategy: "current",
     });
-    expect(config.modelStrategy).toBe("current");
-    expect(config.thinkingTime).toBeUndefined();
+    expect(config.modelStrategy).toBe("select");
+    expect(config.desiredModel).toBe("Use latest model");
+    expect(config.thinkingTime).toBe("extended");
   });
 
-  test("honors explicit browser thinking time", async () => {
+  test("forces extended thinking for Pro even when caller asks for another thinking time", async () => {
     const config = await buildBrowserConfig({
       model: "gpt-5.2-pro",
       browserThinkingTime: "standard",
     });
     expect(config.desiredModel).toBe("Use latest model");
-    expect(config.thinkingTime).toBe("standard");
+    expect(config.thinkingTime).toBe("extended");
   });
 
   test("honors overrides and converts durations + booleans", async () => {
@@ -76,7 +78,8 @@ describe("buildBrowserConfig", () => {
       headless: undefined,
       hideWindow: true,
       keepBrowser: true,
-      desiredModel: "Auto",
+      desiredModel: "Use latest model",
+      thinkingTime: "extended",
       debug: true,
       allowCookieErrors: true,
     });
@@ -95,7 +98,7 @@ describe("buildBrowserConfig", () => {
       model: "gpt-5.1",
       browserModelLabel: "gpt-5.1",
     });
-    expect(config.desiredModel).toBe("Auto");
+    expect(config.desiredModel).toBe("Use latest model");
   });
 
   test("maps thinking Gemini model to thinking label", async () => {
@@ -117,7 +120,7 @@ describe("buildBrowserConfig", () => {
       model: "gpt-5.1",
       browserModelLabel: "  ChatGPT 5.1 Instant  ",
     });
-    expect(config.desiredModel).toBe("Auto");
+    expect(config.desiredModel).toBe("Use latest model");
   });
 
   test("parses remoteChrome host targets", async () => {
@@ -154,23 +157,13 @@ describe("buildBrowserConfig", () => {
     ).rejects.toThrow(/Temporary Chat/i);
   });
 
-  test("allows temporary chat URLs when model strategy keeps current selection", async () => {
-    const config = await buildBrowserConfig({
-      model: "gpt-5.2-pro",
-      chatgptUrl: "https://chatgpt.com/?temporary-chat=true",
-      browserModelStrategy: "current",
-    });
-    expect(config.url).toBe("https://chatgpt.com/?temporary-chat=true");
-    expect(config.modelStrategy).toBe("current");
-  });
-
-  test("allows temporary chat URLs when not targeting Pro", async () => {
-    const config = await buildBrowserConfig({
-      model: "gpt-5.2",
-      chatgptUrl: "https://chatgpt.com/?temporary-chat=true",
-    });
-    expect(config.url).toBe("https://chatgpt.com/?temporary-chat=true");
-    expect(config.desiredModel).toBe("Auto");
+  test("rejects temporary chat URLs for all GPT browser runs", async () => {
+    await expect(
+      buildBrowserConfig({
+        model: "gpt-5.2",
+        chatgptUrl: "https://chatgpt.com/?temporary-chat=true",
+      }),
+    ).rejects.toThrow(/Temporary Chat/i);
   });
 
   test("accepts IPv6 remoteChrome targets wrapped in brackets", async () => {
@@ -213,30 +206,28 @@ describe("resolveBrowserModelLabel", () => {
   test("returns canonical ChatGPT label when CLI value matches API model", () => {
     expect(resolveBrowserModelLabel("gpt-5.4-pro", "gpt-5.4-pro")).toBe("Use latest model");
     expect(resolveBrowserModelLabel("gpt-5.5-pro", "gpt-5.5-pro")).toBe("Use latest model");
-    expect(resolveBrowserModelLabel("gpt-5.5", "gpt-5.5")).toBe("Thinking");
-    expect(resolveBrowserModelLabel("gpt-5.4", "gpt-5.4")).toBe("Thinking");
+    expect(resolveBrowserModelLabel("gpt-5.5", "gpt-5.5")).toBe("Use latest model");
+    expect(resolveBrowserModelLabel("gpt-5.4", "gpt-5.4")).toBe("Use latest model");
     expect(resolveBrowserModelLabel("gpt-5-pro", "gpt-5-pro")).toBe("Use latest model");
     expect(resolveBrowserModelLabel("gpt-5.2-pro", "gpt-5.2-pro")).toBe("Use latest model");
     expect(resolveBrowserModelLabel("gpt-5.1-pro", "gpt-5.1-pro")).toBe("Use latest model");
-    expect(resolveBrowserModelLabel("GPT-5.1", "gpt-5.1")).toBe("Auto");
+    expect(resolveBrowserModelLabel("GPT-5.1", "gpt-5.1")).toBe("Use latest model");
   });
 
   test("falls back to canonical label when input is empty", () => {
-    expect(resolveBrowserModelLabel("", "gpt-5.1")).toBe("Auto");
+    expect(resolveBrowserModelLabel("", "gpt-5.1")).toBe("Use latest model");
   });
 
-  test("preserves descriptive labels to target alternate picker entries", () => {
-    expect(resolveBrowserModelLabel("ChatGPT 5.1 Instant", "gpt-5.1")).toBe("ChatGPT 5.1 Instant");
+  test("ignores descriptive GPT labels and targets latest Pro", () => {
+    expect(resolveBrowserModelLabel("ChatGPT 5.1 Instant", "gpt-5.1")).toBe("Use latest model");
   });
 
   test("supports undefined or whitespace-only input", () => {
     expect(resolveBrowserModelLabel(undefined, "gpt-5.2-pro")).toBe("Use latest model");
-    expect(resolveBrowserModelLabel("   ", "gpt-5.1")).toBe("Auto");
+    expect(resolveBrowserModelLabel("   ", "gpt-5.1")).toBe("Use latest model");
   });
 
-  test("trims descriptive labels before returning them", () => {
-    expect(resolveBrowserModelLabel("  ChatGPT 5.1 Thinking ", "gpt-5.1")).toBe(
-      "ChatGPT 5.1 Thinking",
-    );
+  test("preserves descriptive non-GPT labels", () => {
+    expect(resolveBrowserModelLabel("  Gemini 3 Pro ", "gemini-3-pro")).toBe("Gemini 3 Pro");
   });
 });

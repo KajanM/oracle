@@ -39,7 +39,7 @@ Oracle reads an optional per-user config from `~/.oracle/config.json`. The file 
     autoReattachIntervalMs: 0, // interval between auto-reattach attempts (0 = disabled)
     autoReattachTimeoutMs: 120000, // time budget per auto-reattach attempt (default: 2m)
     modelStrategy: "select", // select | current | ignore (ChatGPT only; ignored for Gemini web)
-    thinkingTime: "extended", // light | standard | extended | heavy (ChatGPT Thinking/Pro models)
+    thinkingTime: "extended", // non-GPT browser thinking time; GPT browser runs force Extended Pro
     manualLogin: false, // set true to reuse a persistent automation profile and sign in once (Windows defaults to true when unset)
     manualLoginProfileDir: null, // override profile dir (or set ORACLE_BROWSER_PROFILE_DIR)
     headless: false,
@@ -78,7 +78,7 @@ CLI flags → `config.json` → environment → built-in defaults.
 - `sessionRetentionHours` controls the default value for `--retain-hours`. When unset, `ORACLE_RETAIN_HOURS` (if present) becomes the fallback, and the CLI flag still wins over both.
 - `ORACLE_MAX_FILE_SIZE_BYTES` overrides `maxFileSizeBytes` when set. Oracle validates it as a positive integer number of bytes before reading any `--file` inputs.
 - `browser.chatgptUrl` accepts either the root ChatGPT URL (`https://chatgpt.com/`) or a folder/workspace URL (e.g., `https://chatgpt.com/g/.../project`); `browser.url` remains as a legacy alias.
-- Browser automation defaults can be set under `browser.*`, including `browser.manualLogin`, `browser.manualLoginProfileDir`, and `browser.thinkingTime` (CLI override: `--browser-thinking-time`). Pro browser runs default to extended Pro composer mode when Oracle selects the model unless this setting is provided. On Windows, `browser.manualLogin` defaults to `true` when omitted.
+- Browser automation defaults can be set under `browser.*`, including `browser.thinkingTime` for non-GPT browser models (CLI override: `--browser-thinking-time`). GPT browser runs ignore stale thinking-time overrides and always force ChatGPT Latest / Extended Pro.
 
 If the config is missing or invalid, Oracle falls back to defaults and prints a warning for parse errors.
 

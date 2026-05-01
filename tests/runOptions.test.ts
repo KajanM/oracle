@@ -163,14 +163,14 @@ describe("resolveRunOptionsFromConfig", () => {
     expect(runOptions.model).toBe("gemini-3-pro");
   });
 
-  it("maps browser engine legacy GPT targets to gpt-5.2", () => {
+  it("maps browser engine legacy GPT targets to latest ChatGPT Pro", () => {
     const { resolvedEngine, runOptions } = resolveRunOptionsFromConfig({
       prompt: basePrompt,
       model: "gpt-5.1",
       engine: "browser",
     });
     expect(resolvedEngine).toBe("browser");
-    expect(runOptions.model).toBe("gpt-5.2");
+    expect(runOptions.model).toBe("gpt-5.5-pro");
   });
 
   it("maps browser engine Pro aliases to the latest ChatGPT Pro target", () => {

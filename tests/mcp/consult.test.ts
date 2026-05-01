@@ -60,12 +60,13 @@ describe("summarizeModelRunsForConsult", () => {
       manualLogin: false,
       manualLoginProfileDir: null,
       thinkingTime: "extended",
-      desiredModel: "Auto",
+      modelStrategy: "select",
+      desiredModel: "Use latest model",
       cookieSync: true,
     });
   });
 
-  test("lets explicit consult inputs override config defaults", () => {
+  test("lets explicit consult inputs override config defaults for non-GPT browser runs", () => {
     const config = buildConsultBrowserConfig({
       userConfig: {
         browser: {
@@ -91,6 +92,29 @@ describe("summarizeModelRunsForConsult", () => {
       manualLoginProfileDir: null,
       thinkingTime: "heavy",
       desiredModel: "Claude Sonnet",
+      cookieSync: true,
+    });
+  });
+
+  test("forces GPT consult runs to latest Pro extended even with stale caller inputs", () => {
+    const config = buildConsultBrowserConfig({
+      userConfig: {
+        browser: {
+          modelStrategy: "current",
+          thinkingTime: "light",
+        },
+      },
+      env: {},
+      runModel: "gpt-5.5-pro",
+      inputModel: "gpt-5.4-pro",
+      browserModelLabel: "GPT-5.4 Pro",
+      browserThinkingTime: "standard",
+    });
+
+    expect(config).toMatchObject({
+      modelStrategy: "select",
+      thinkingTime: "extended",
+      desiredModel: "Use latest model",
       cookieSync: true,
     });
   });

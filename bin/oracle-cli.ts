@@ -579,7 +579,7 @@ program
   .addOption(
     new Option(
       "--browser-thinking-time <level>",
-      "Thinking time intensity for Thinking/Pro models: light, standard, extended, heavy.",
+      "Thinking time intensity for non-GPT browser models. GPT browser runs always use Extended Pro.",
     )
       .choices(["light", "standard", "extended", "heavy"])
       .hideHelp(),

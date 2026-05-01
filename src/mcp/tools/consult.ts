@@ -206,7 +206,10 @@ export function buildConsultBrowserConfig({
     manualLogin: false,
     manualLoginProfileDir: null,
     manualLoginCookieSync: false,
-    thinkingTime: browserThinkingTime ?? configuredBrowser.thinkingTime,
+    modelStrategy: isChatGptModel ? "select" : configuredBrowser.modelStrategy,
+    thinkingTime: isChatGptModel
+      ? "extended"
+      : (browserThinkingTime ?? configuredBrowser.thinkingTime),
     desiredModel: desiredModelLabel || mapModelToBrowserLabel(runModel),
   };
 }
