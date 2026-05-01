@@ -134,6 +134,7 @@ export async function performSessionRun({
         transport: undefined,
         error: undefined,
       });
+      await persistBrowserAssistantOutput(sessionMeta.id, result.answerText ?? "", modelForStatus);
       await writeAssistantOutput(runOptions.writeOutputPath, result.answerText ?? "", log);
       await sendSessionNotification(
         {
@@ -554,6 +555,48 @@ export async function performSessionRun({
   }
 }
 
+type SessionLogWriter = ReturnType<typeof sessionStore.createLogWriter>;
+
+async function persistBrowserAssistantOutput(
+  sessionId: string,
+  answerText: string,
+  model?: string,
+  prefixLines: string[] = [],
+): Promise<void> {
+  const writeOutput = async (writer: SessionLogWriter) => {
+    for (const line of prefixLines) {
+      writer.logLine(line);
+    }
+    writer.logLine("Answer:");
+    writer.logLine(answerText);
+    await closeSessionLogWriter(writer);
+  };
+
+  await writeOutput(sessionStore.createLogWriter(sessionId));
+
+  if (!model) return;
+  await writeOutput(sessionStore.createLogWriter(sessionId, model));
+}
+
+async function closeSessionLogWriter(writer: SessionLogWriter): Promise<void> {
+  const stream = writer.stream as SessionLogWriter["stream"] & {
+    off?: (event: string, listener: (...args: unknown[]) => void) => void;
+    once?: (event: string, listener: (...args: unknown[]) => void) => void;
+  };
+  if (typeof stream.once !== "function") {
+    stream.end();
+    return;
+  }
+  await new Promise<void>((resolve, reject) => {
+    const onError = (error: unknown) => reject(error);
+    stream.once?.("error", onError);
+    stream.end(() => {
+      stream.off?.("error", onError);
+      resolve();
+    });
+  });
+}
+
 function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -682,11 +725,9 @@ async function autoReattachUntilComplete({
       });
       const answerText = result.answerMarkdown || result.answerText || "";
       const outputTokens = estimateTokenCount(answerText);
-      const logWriter = sessionStore.createLogWriter(sessionMeta.id);
-      logWriter.logLine(`[auto-reattach] captured assistant response on attempt ${attempt}`);
-      logWriter.logLine("Answer:");
-      logWriter.logLine(answerText);
-      logWriter.stream.end();
+      await persistBrowserAssistantOutput(sessionMeta.id, answerText, modelForStatus, [
+        `[auto-reattach] captured assistant response on attempt ${attempt}`,
+      ]);
       if (modelForStatus) {
         await sessionStore.updateModelRun(sessionMeta.id, modelForStatus, {
           status: "completed",

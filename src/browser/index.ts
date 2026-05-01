@@ -191,7 +191,9 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
       logger,
     ));
   const chromeHost = (chrome as unknown as { host?: string }).host ?? "127.0.0.1";
-  logger(`[browser] [phase] chrome-launch — ${Date.now() - chromeStartMs}ms pid=${chrome.pid} port=${chrome.port} reused=${Boolean(reusedChrome)}`);
+  logger(
+    `[browser] [phase] chrome-launch — ${Date.now() - chromeStartMs}ms pid=${chrome.pid} port=${chrome.port} reused=${Boolean(reusedChrome)}`,
+  );
   // Persist profile state so future manual-login runs can reuse this Chrome.
   if (manualLogin && chrome.port) {
     await writeDevToolsActivePort(userDataDir, chrome.port);
@@ -213,7 +215,9 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
       },
     );
   } catch (err) {
-    logger(`[browser] [warn] registerTerminationHooks failed: ${err instanceof Error ? err.message : err}`);
+    logger(
+      `[browser] [warn] registerTerminationHooks failed: ${err instanceof Error ? err.message : err}`,
+    );
   }
 
   let client: ChromeClient | null = null;
@@ -247,13 +251,19 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
       }
       throw error;
     }
-    logger(`[browser] [phase] cdp-connect — ${Date.now() - cdpStartMs}ms targetId=${isolatedTargetId ?? "default"}`);
-    logger(`[browser] [build] oracle build=${getBuildTag()} pid=${process.pid} chrome_pid=${chrome.pid} port=${chrome.port}`);
+    logger(
+      `[browser] [phase] cdp-connect — ${Date.now() - cdpStartMs}ms targetId=${isolatedTargetId ?? "default"}`,
+    );
+    logger(
+      `[browser] [build] oracle build=${getBuildTag()} pid=${process.pid} chrome_pid=${chrome.pid} port=${chrome.port}`,
+    );
     const disconnectPromise = new Promise<never>((_, reject) => {
       client?.on("disconnect", () => {
         connectionClosedUnexpectedly = true;
         const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
-        logger(`[browser] [lifecycle] CDP disconnected after ${elapsedSec}s — chrome_pid=${chrome.pid} port=${chrome.port}`);
+        logger(
+          `[browser] [lifecycle] CDP disconnected after ${elapsedSec}s — chrome_pid=${chrome.pid} port=${chrome.port}`,
+        );
         reject(
           new Error(
             "Chrome window closed before oracle finished. Please keep it open until completion.",
@@ -269,7 +279,9 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
         try {
           await Page.bringToFront();
         } catch (err) {
-          logger(`[browser] [warn] bringToFront failed: ${err instanceof Error ? err.message : err}`);
+          logger(
+            `[browser] [warn] bringToFront failed: ${err instanceof Error ? err.message : err}`,
+          );
         }
       }
     };
@@ -351,7 +363,9 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
       );
     }
 
-    logger(`[browser] [phase] cookie-sync — ${Date.now() - cookieStartMs}ms count=${appliedCookies}`);
+    logger(
+      `[browser] [phase] cookie-sync — ${Date.now() - cookieStartMs}ms count=${appliedCookies}`,
+    );
     const navStartMs = Date.now();
     const baseUrl = CHATGPT_URL;
     // First load the base ChatGPT homepage to satisfy potential interstitials,
@@ -397,7 +411,9 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
           lastUrl = info?.targetInfo?.url ?? lastUrl;
         }
       } catch (err) {
-        logger(`[browser] [warn] getTargetInfo failed: ${err instanceof Error ? err.message : err}`);
+        logger(
+          `[browser] [warn] getTargetInfo failed: ${err instanceof Error ? err.message : err}`,
+        );
       }
       try {
         const { result } = await Runtime.evaluate({
@@ -408,7 +424,9 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
           lastUrl = result.value;
         }
       } catch (err) {
-        logger(`[browser] [warn] location.href eval failed: ${err instanceof Error ? err.message : err}`);
+        logger(
+          `[browser] [warn] location.href eval failed: ${err instanceof Error ? err.message : err}`,
+        );
       }
       if (lastUrl) {
         logger(`[browser] url = ${lastUrl}`);
@@ -444,7 +462,9 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
             return true;
           }
         } catch (err) {
-          logger(`[browser] [warn] conversation hint poll failed: ${err instanceof Error ? err.message : err}`);
+          logger(
+            `[browser] [warn] conversation hint poll failed: ${err instanceof Error ? err.message : err}`,
+          );
         }
         await delay(250);
       }
@@ -469,7 +489,14 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
       await bringPageToFront();
       await raceWithDisconnect(
         withRetries(
-          () => ensureModelSelection(Runtime, config.desiredModel as string, logger, modelStrategy, Input),
+          () =>
+            ensureModelSelection(
+              Runtime,
+              config.desiredModel as string,
+              logger,
+              modelStrategy,
+              Input,
+            ),
           {
             retries: 2,
             delayMs: 300,
@@ -499,7 +526,9 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
     } else if (modelStrategy === "ignore") {
       logger("[browser] [phase] model-select — skipped (strategy=ignore)");
     }
-    logger(`[browser] [phase] model-select — ${Date.now() - modelStartMs}ms model=${config.desiredModel ?? "default"} strategy=${modelStrategy}`);
+    logger(
+      `[browser] [phase] model-select — ${Date.now() - modelStartMs}ms model=${config.desiredModel ?? "default"} strategy=${modelStrategy}`,
+    );
     // Handle thinking time selection if specified
     const thinkingTime = config.thinkingTime;
     if (thinkingTime) {
@@ -517,7 +546,9 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
           },
         }),
       );
-      logger(`[browser] [phase] thinking-time — ${Date.now() - thinkStartMs}ms level=${thinkingTime}`);
+      logger(
+        `[browser] [phase] thinking-time — ${Date.now() - thinkStartMs}ms level=${thinkingTime}`,
+      );
     }
     const profileLockTimeoutMs = manualLogin ? (config.profileLockTimeoutMs ?? 0) : 0;
     let profileLock: ProfileRunLock | null = null;
@@ -536,7 +567,9 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
     };
     const submitOnce = async (prompt: string, submissionAttachments: BrowserAttachment[]) => {
       const submitStartMs = Date.now();
-      logger(`[browser] [phase] submit-flow — started chars=${prompt.length} attachments=${submissionAttachments.length}`);
+      logger(
+        `[browser] [phase] submit-flow — started chars=${prompt.length} attachments=${submissionAttachments.length}`,
+      );
       const baselineSnapshot = await readAssistantSnapshot(Runtime).catch(() => null);
       const baselineAssistantText =
         typeof baselineSnapshot?.text === "string" ? baselineSnapshot.text.trim() : "";
@@ -636,7 +669,9 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
       }
       // Reattach needs a /c/ URL; ChatGPT can update it late, so poll in the background.
       scheduleConversationHint("post-submit", config.timeoutMs ?? 120_000);
-      logger(`[browser] [phase] submit-flow — ${Date.now() - submitStartMs}ms baseline_turns=${baselineTurns ?? "none"}`);
+      logger(
+        `[browser] [phase] submit-flow — ${Date.now() - submitStartMs}ms baseline_turns=${baselineTurns ?? "none"}`,
+      );
       return { baselineTurns, baselineAssistantText };
     };
 
@@ -769,7 +804,9 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
       return rechecked;
     };
     const waitStartMs = Date.now();
-    logger(`[browser] [lifecycle] waiting for assistant response — timeout=${config.timeoutMs}ms baseline_turns=${baselineTurns ?? "none"}`);
+    logger(
+      `[browser] [lifecycle] waiting for assistant response — timeout=${config.timeoutMs}ms baseline_turns=${baselineTurns ?? "none"}`,
+    );
     try {
       answer = await raceWithDisconnect(
         waitForAssistantResponseWithReload(
@@ -781,7 +818,9 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
         ),
       );
       const waitElapsed = Math.round((Date.now() - waitStartMs) / 1000);
-      logger(`[browser] [lifecycle] assistant response captured after ${waitElapsed}s — ${answer.text.length} chars`);
+      logger(
+        `[browser] [lifecycle] assistant response captured after ${waitElapsed}s — ${answer.text.length} chars`,
+      );
     } catch (error) {
       if (isAssistantResponseTimeoutError(error)) {
         const rechecked = await attemptAssistantRecheck().catch(() => null);
@@ -811,7 +850,9 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
         // Attempt to reconnect and capture the assistant response.
         // On success, return IMMEDIATELY — the old Runtime/Page/Input handles
         // are dead, so post-processing (markdown capture, sanity checks) would fail.
-        logger(`[browser] [recovery] CDP disconnected during assistant response — attempting reconnection to port=${chrome.port}`);
+        logger(
+          `[browser] [recovery] CDP disconnected during assistant response — attempting reconnection to port=${chrome.port}`,
+        );
         const recoveryRemainingMs = Math.max(0, config.timeoutMs - (Date.now() - waitStartMs));
         const recovered = await recoverAssistantResponseViaCdpReconnect(
           chrome.port,
@@ -822,11 +863,15 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
           logger,
           recoveryRemainingMs,
         ).catch((reconnectError) => {
-          logger(`[browser] [recovery] reconnection failed: ${reconnectError instanceof Error ? reconnectError.message : reconnectError}`);
+          logger(
+            `[browser] [recovery] reconnection failed: ${reconnectError instanceof Error ? reconnectError.message : reconnectError}`,
+          );
           return null;
         });
         if (recovered) {
-          logger(`[browser] [recovery] recovered ${recovered.text.length} chars via CDP reconnection — returning immediately`);
+          logger(
+            `[browser] [recovery] recovered ${recovered.text.length} chars via CDP reconnection — returning immediately`,
+          );
           stopThinkingMonitor?.();
           runStatus = "complete";
           const durationMs = Date.now() - startedAt;
@@ -1110,12 +1155,14 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
     // otherwise an empty about:blank Chrome window is left on screen.
     const recoveredSuccessfully = connectionClosedUnexpectedly && runStatus === "complete";
     const shouldKillChrome = !connectionClosedUnexpectedly || recoveredSuccessfully;
-      if (!keepBrowserOpen) {
+    if (!keepBrowserOpen) {
       if (shouldKillChrome) {
         try {
           await chrome.kill();
         } catch (err) {
-          logger(`[browser] [warn] chrome.kill() failed: ${err instanceof Error ? err.message : err}`);
+          logger(
+            `[browser] [warn] chrome.kill() failed: ${err instanceof Error ? err.message : err}`,
+          );
         }
       }
       if (manualLogin) {
@@ -1139,11 +1186,25 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
       if (shouldKillChrome) {
         const totalSeconds = (Date.now() - startedAt) / 1000;
         logger(`[browser] [phase] cleanup — ${Date.now() - cleanupStartMs}ms`);
-        logger(`[browser] [phase] total — ${Math.round(totalSeconds * 1000)}ms status=${runStatus}`);
+        logger(
+          `[browser] [phase] total — ${Math.round(totalSeconds * 1000)}ms status=${runStatus}`,
+        );
       }
     } else if (!connectionClosedUnexpectedly) {
+      detachKeptBrowserProcess(chrome, logger);
       logger(`Chrome left running on port ${chrome.port} with profile ${userDataDir}`);
     }
+  }
+}
+
+export function detachKeptBrowserProcess(chrome: LaunchedChrome, logger: BrowserLogger): void {
+  const child = (chrome as { process?: { unref?: () => void } }).process;
+  try {
+    child?.unref?.();
+  } catch (error) {
+    logger(
+      `[browser] [warn] chrome process unref failed: ${error instanceof Error ? error.message : error}`,
+    );
   }
 }
 
@@ -1411,7 +1472,9 @@ async function runRemoteBrowserMode(
         try {
           await Page.bringToFront();
         } catch (err) {
-          logger(`[browser] [warn] remote bringToFront failed: ${err instanceof Error ? err.message : err}`);
+          logger(
+            `[browser] [warn] remote bringToFront failed: ${err instanceof Error ? err.message : err}`,
+          );
         }
       }
     };
@@ -1450,14 +1513,23 @@ async function runRemoteBrowserMode(
       }
       await emitRuntimeHint();
     } catch (err) {
-      logger(`[browser] [warn] remote snapshot failed: ${err instanceof Error ? err.message : err}`);
+      logger(
+        `[browser] [warn] remote snapshot failed: ${err instanceof Error ? err.message : err}`,
+      );
     }
 
     const modelStrategy = config.modelStrategy ?? DEFAULT_MODEL_STRATEGY;
     if (config.desiredModel && modelStrategy !== "ignore") {
       await bringPageToFront();
       await withRetries(
-        () => ensureModelSelection(Runtime, config.desiredModel as string, logger, modelStrategy, Input),
+        () =>
+          ensureModelSelection(
+            Runtime,
+            config.desiredModel as string,
+            logger,
+            modelStrategy,
+            Input,
+          ),
         {
           retries: 2,
           delayMs: 300,
@@ -1682,7 +1754,9 @@ async function runRemoteBrowserMode(
               lastUrl = conversationUrl;
             }
           } catch (err) {
-            logger(`[browser] [warn] readConversationUrl failed: ${err instanceof Error ? err.message : err}`);
+            logger(
+              `[browser] [warn] readConversationUrl failed: ${err instanceof Error ? err.message : err}`,
+            );
           }
           await emitRuntimeHint();
           const runtime = {
@@ -1869,7 +1943,9 @@ async function runRemoteBrowserMode(
         await client.close();
       }
     } catch (err) {
-      logger(`[browser] [warn] remote client.close() failed: ${err instanceof Error ? err.message : err}`);
+      logger(
+        `[browser] [warn] remote client.close() failed: ${err instanceof Error ? err.message : err}`,
+      );
     }
     removeDialogHandler?.();
     await closeRemoteChromeTarget(host, port, remoteTargetId ?? undefined, logger);
@@ -1976,12 +2052,17 @@ function isAssistantResponseTimeoutError(error: unknown): boolean {
   );
 }
 
-async function readConversationUrl(Runtime: ChromeClient["Runtime"], logger?: BrowserLogger): Promise<string | null> {
+async function readConversationUrl(
+  Runtime: ChromeClient["Runtime"],
+  logger?: BrowserLogger,
+): Promise<string | null> {
   try {
     const currentUrl = await Runtime.evaluate({ expression: "location.href", returnByValue: true });
     return typeof currentUrl.result?.value === "string" ? currentUrl.result.value : null;
   } catch (err) {
-    logger?.(`[browser] [warn] readConversationUrl eval failed: ${err instanceof Error ? err.message : err}`);
+    logger?.(
+      `[browser] [warn] readConversationUrl eval failed: ${err instanceof Error ? err.message : err}`,
+    );
     return null;
   }
 }
@@ -2181,7 +2262,9 @@ function startThinkingStatusMonitor(
         logger(formatThinkingLog(startedAt, Date.now(), nextMessage, locatorSuffix));
       }
     } catch (err) {
-      logger(`[browser] [warn] thinking monitor poll failed: ${err instanceof Error ? err.message : err}`);
+      logger(
+        `[browser] [warn] thinking monitor poll failed: ${err instanceof Error ? err.message : err}`,
+      );
     } finally {
       pending = false;
     }
@@ -2336,14 +2419,22 @@ async function recoverAssistantResponseViaCdpReconnect(
   minTurnIndex: number | undefined,
   logger: BrowserLogger,
   remainingTimeoutMs?: number,
-): Promise<{ text: string; html?: string; meta: { turnId?: string | null; messageId?: string | null } } | null> {
+): Promise<{
+  text: string;
+  html?: string;
+  meta: { turnId?: string | null; messageId?: string | null };
+} | null> {
   const effectiveHost = chromeHost || "127.0.0.1";
 
   // Step 1: Verify Chrome is still reachable
   logger(`[browser] [recovery] checking Chrome health at ${effectiveHost}:${port}`);
   let targets: Array<{ id: string; type: string; url: string }>;
   try {
-    targets = await CDP.List({ host: effectiveHost, port }) as Array<{ id: string; type: string; url: string }>;
+    targets = (await CDP.List({ host: effectiveHost, port })) as Array<{
+      id: string;
+      type: string;
+      url: string;
+    }>;
     logger(`[browser] [recovery] Chrome alive — ${targets.length} targets found`);
   } catch (err) {
     logger(`[browser] [recovery] Chrome unreachable: ${err instanceof Error ? err.message : err}`);
@@ -2358,29 +2449,31 @@ async function recoverAssistantResponseViaCdpReconnect(
   if (isolatedTargetId) {
     const found = targets.find((t) => t.id === isolatedTargetId);
     if (found) {
-      logger(`[browser] [recovery] found original isolated target ${isolatedTargetId} — url=${found.url.slice(0, 80)}`);
+      logger(
+        `[browser] [recovery] found original isolated target ${isolatedTargetId} — url=${found.url.slice(0, 80)}`,
+      );
       targetId = isolatedTargetId;
     } else {
-      logger(`[browser] [recovery] original target ${isolatedTargetId} not found — trying URL match`);
+      logger(
+        `[browser] [recovery] original target ${isolatedTargetId} not found — trying URL match`,
+      );
     }
   }
   if (!targetId && lastKnownUrl) {
     // Extract conversation ID for fuzzy matching (URL may have trailing params)
     const conversationId = extractConversationIdFromUrl(lastKnownUrl);
     // Try exact URL match first
-    const exactMatch = targets.find(
-      (t) => t.type === "page" && t.url === lastKnownUrl,
-    );
+    const exactMatch = targets.find((t) => t.type === "page" && t.url === lastKnownUrl);
     if (exactMatch) {
       logger(`[browser] [recovery] exact URL match: ${exactMatch.url.slice(0, 80)}`);
       targetId = exactMatch.id;
     } else if (conversationId) {
       // Fall back to conversation ID match
-      const cidMatch = targets.find(
-        (t) => t.type === "page" && t.url.includes(conversationId),
-      );
+      const cidMatch = targets.find((t) => t.type === "page" && t.url.includes(conversationId));
       if (cidMatch) {
-        logger(`[browser] [recovery] conversation ID match (${conversationId}): ${cidMatch.url.slice(0, 80)}`);
+        logger(
+          `[browser] [recovery] conversation ID match (${conversationId}): ${cidMatch.url.slice(0, 80)}`,
+        );
         targetId = cidMatch.id;
       }
     }
@@ -2400,14 +2493,18 @@ async function recoverAssistantResponseViaCdpReconnect(
     reconnectedClient = await CDP({ host: effectiveHost, port, target: targetId });
     logger(`[browser] [recovery] CDP reconnected successfully`);
   } catch (err) {
-    logger(`[browser] [recovery] CDP reconnect failed: ${err instanceof Error ? err.message : err}`);
+    logger(
+      `[browser] [recovery] CDP reconnect failed: ${err instanceof Error ? err.message : err}`,
+    );
     return null;
   }
 
   // Step 4: Enable Runtime and read the assistant snapshot
   try {
     await reconnectedClient.Runtime.enable();
-    logger(`[browser] [recovery] Runtime enabled — reading assistant snapshot (minTurnIndex=${minTurnIndex ?? "none"})`);
+    logger(
+      `[browser] [recovery] Runtime enabled — reading assistant snapshot (minTurnIndex=${minTurnIndex ?? "none"})`,
+    );
 
     // Wait briefly for any in-flight rendering to settle
     await delay(2000);
@@ -2432,15 +2529,21 @@ async function recoverAssistantResponseViaCdpReconnect(
       });
       const d = diag.result?.value as Record<string, unknown> | undefined;
       diagStopVisible = Boolean(d?.stopVisible);
-      logger(`[browser] [recovery] DOM diagnostic — totalTurns=${d?.totalTurns} assistantTurns=${d?.assistantTurns} lastAssistantIndex=${d?.lastAssistantIndex} stop=${d?.stopVisible} textPreview="${String(d?.lastAssistantText ?? '').slice(0, 100)}"`);
+      logger(
+        `[browser] [recovery] DOM diagnostic — totalTurns=${d?.totalTurns} assistantTurns=${d?.assistantTurns} lastAssistantIndex=${d?.lastAssistantIndex} stop=${d?.stopVisible} textPreview="${String(d?.lastAssistantText ?? "").slice(0, 100)}"`,
+      );
     } catch (diagErr) {
-      logger(`[browser] [recovery] DOM diagnostic failed: ${diagErr instanceof Error ? diagErr.message : diagErr}`);
+      logger(
+        `[browser] [recovery] DOM diagnostic failed: ${diagErr instanceof Error ? diagErr.message : diagErr}`,
+      );
     }
 
     // If the stop button is still visible, ChatGPT is still thinking.
     // Poll for completion instead of capturing an interim thinking snippet.
     if (diagStopVisible && remainingTimeoutMs && remainingTimeoutMs > 0) {
-      logger(`[browser] [recovery] stop button still visible — entering poll loop (timeout=${Math.round(remainingTimeoutMs / 1000)}s)`);
+      logger(
+        `[browser] [recovery] stop button still visible — entering poll loop (timeout=${Math.round(remainingTimeoutMs / 1000)}s)`,
+      );
       try {
         const pollResult = await pollAssistantCompletion(
           reconnectedClient.Runtime,
@@ -2456,23 +2559,19 @@ async function recoverAssistantResponseViaCdpReconnect(
         }
         logger(`[browser] [recovery] poll returned null — falling through to one-shot snapshot`);
       } catch (pollErr) {
-        logger(`[browser] [recovery] poll failed: ${pollErr instanceof Error ? pollErr.message : pollErr} — falling through to one-shot snapshot`);
+        logger(
+          `[browser] [recovery] poll failed: ${pollErr instanceof Error ? pollErr.message : pollErr} — falling through to one-shot snapshot`,
+        );
       }
     }
 
     // One-shot snapshot: either stop was already gone, or polling failed/timed out.
-    let snapshot = await readAssistantSnapshot(
-      reconnectedClient.Runtime,
-      minTurnIndex,
-    );
+    let snapshot = await readAssistantSnapshot(reconnectedClient.Runtime, minTurnIndex);
 
     // If filtered snapshot is empty, try again without the filter
     if (!snapshot?.text?.trim() && typeof minTurnIndex === "number") {
       logger(`[browser] [recovery] filtered snapshot empty — retrying without minTurnIndex filter`);
-      snapshot = await readAssistantSnapshot(
-        reconnectedClient.Runtime,
-        undefined,
-      );
+      snapshot = await readAssistantSnapshot(reconnectedClient.Runtime, undefined);
     }
 
     if (!snapshot || !snapshot.text?.trim()) {
@@ -2481,7 +2580,9 @@ async function recoverAssistantResponseViaCdpReconnect(
     }
 
     const text = snapshot.text.trim();
-    logger(`[browser] [recovery] captured ${text.length} chars — preview: ${text.slice(0, 120).replace(/\n/g, " ")}`);
+    logger(
+      `[browser] [recovery] captured ${text.length} chars — preview: ${text.slice(0, 120).replace(/\n/g, " ")}`,
+    );
 
     return {
       text,
@@ -2492,7 +2593,9 @@ async function recoverAssistantResponseViaCdpReconnect(
       },
     };
   } catch (err) {
-    logger(`[browser] [recovery] snapshot capture failed: ${err instanceof Error ? err.message : err}`);
+    logger(
+      `[browser] [recovery] snapshot capture failed: ${err instanceof Error ? err.message : err}`,
+    );
     return null;
   } finally {
     try {

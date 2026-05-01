@@ -125,3 +125,39 @@ describe("connectWithNewTab", () => {
     expect(cdpMock).toHaveBeenCalledWith({ host: "127.0.0.1", port: 9222, target: "target-2" });
   });
 });
+
+describe("detachKeptBrowserProcess", () => {
+  test("unrefs launched Chrome when keeping the browser open", async () => {
+    const { detachKeptBrowserProcess } = await import("../../src/browser/index.js");
+    const unref = vi.fn();
+    const logger = vi.fn();
+
+    detachKeptBrowserProcess(
+      { process: { unref } } as unknown as import("chrome-launcher").LaunchedChrome,
+      logger,
+    );
+
+    expect(unref).toHaveBeenCalledTimes(1);
+    expect(logger).not.toHaveBeenCalled();
+  });
+
+  test("logs unref failures without throwing", async () => {
+    const { detachKeptBrowserProcess } = await import("../../src/browser/index.js");
+    const logger = vi.fn();
+
+    expect(() =>
+      detachKeptBrowserProcess(
+        {
+          process: {
+            unref: () => {
+              throw new Error("nope");
+            },
+          },
+        } as unknown as import("chrome-launcher").LaunchedChrome,
+        logger,
+      ),
+    ).not.toThrow();
+
+    expect(logger).toHaveBeenCalledWith(expect.stringContaining("chrome process unref failed"));
+  });
+});

@@ -750,6 +750,41 @@ describe("performSessionRun", () => {
     );
   });
 
+  test("persists completed browser answers to session and model logs", async () => {
+    const mainLog = { logLine: vi.fn(), writeChunk: vi.fn(), stream: { end: vi.fn() } };
+    const modelLog = { logLine: vi.fn(), writeChunk: vi.fn(), stream: { end: vi.fn() } };
+    sessionStoreMock.createLogWriter.mockReturnValueOnce(mainLog).mockReturnValueOnce(modelLog);
+    vi.mocked(runBrowserSessionExecution).mockResolvedValue({
+      usage: { inputTokens: 100, outputTokens: 50, reasoningTokens: 0, totalTokens: 150 },
+      elapsedMs: 2000,
+      runtime: { chromePid: 123, chromePort: 9222, userDataDir: "/tmp/profile" },
+      answerText: "browser final answer",
+    });
+
+    await performSessionRun({
+      sessionMeta: baseSessionMeta,
+      runOptions: baseRunOptions,
+      mode: "browser",
+      browserConfig: { chromePath: null },
+      cwd: "/tmp",
+      log,
+      write,
+      version: cliVersion,
+    });
+
+    expect(sessionStoreMock.createLogWriter).toHaveBeenCalledWith(baseSessionMeta.id);
+    expect(sessionStoreMock.createLogWriter).toHaveBeenCalledWith(
+      baseSessionMeta.id,
+      "gpt-5.2-pro",
+    );
+    expect(mainLog.logLine).toHaveBeenCalledWith("Answer:");
+    expect(mainLog.logLine).toHaveBeenCalledWith("browser final answer");
+    expect(modelLog.logLine).toHaveBeenCalledWith("Answer:");
+    expect(modelLog.logLine).toHaveBeenCalledWith("browser final answer");
+    expect(mainLog.stream.end).toHaveBeenCalled();
+    expect(modelLog.stream.end).toHaveBeenCalled();
+  });
+
   test("writes browser answers to disk when writeOutputPath provided", async () => {
     vi.mocked(runBrowserSessionExecution).mockResolvedValue({
       usage: { inputTokens: 10, outputTokens: 5, reasoningTokens: 0, totalTokens: 15 },
@@ -1022,6 +1057,9 @@ describe("performSessionRun", () => {
   });
 
   test("auto-reattaches after assistant timeout when configured", async () => {
+    const mainLog = { logLine: vi.fn(), writeChunk: vi.fn(), stream: { end: vi.fn() } };
+    const modelLog = { logLine: vi.fn(), writeChunk: vi.fn(), stream: { end: vi.fn() } };
+    sessionStoreMock.createLogWriter.mockReturnValueOnce(mainLog).mockReturnValueOnce(modelLog);
     const automationError = new BrowserAutomationError("assistant timed out", {
       stage: "assistant-timeout",
       runtime: { chromePort: 9222, chromeHost: "127.0.0.1", tabUrl: "https://chatgpt.com/c/demo" },
@@ -1054,6 +1092,19 @@ describe("performSessionRun", () => {
       status: "completed",
       response: { status: "completed" },
     });
+    expect(sessionStoreMock.createLogWriter).toHaveBeenCalledWith(baseSessionMeta.id);
+    expect(sessionStoreMock.createLogWriter).toHaveBeenCalledWith(
+      baseSessionMeta.id,
+      "gpt-5.2-pro",
+    );
+    expect(mainLog.logLine).toHaveBeenCalledWith(
+      "[auto-reattach] captured assistant response on attempt 1",
+    );
+    expect(mainLog.logLine).toHaveBeenCalledWith("ok markdown");
+    expect(modelLog.logLine).toHaveBeenCalledWith(
+      "[auto-reattach] captured assistant response on attempt 1",
+    );
+    expect(modelLog.logLine).toHaveBeenCalledWith("ok markdown");
     expect(vi.mocked(sendSessionNotification)).toHaveBeenCalled();
   });
 
