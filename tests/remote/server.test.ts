@@ -32,11 +32,13 @@ describe("remote browser service", () => {
       await writeFile(attachmentPath, "hello world", "utf8");
 
       const runLog: string[] = [];
+      const browserConfigs: Array<Record<string, unknown>> = [];
       const server = await createRemoteServer(
         { host: "127.0.0.1", port: 0, token: "secret", logger: () => {} },
         {
           runBrowser: async (options) => {
             runLog.push(options.prompt);
+            browserConfigs.push(options.config as Record<string, unknown>);
             expect(options.attachments).toHaveLength(1);
             const attachment = options.attachments?.[0];
             if (!attachment) {
@@ -74,6 +76,14 @@ describe("remote browser service", () => {
       expect(clientLogs.some((entry) => entry.includes("uploading attachment"))).toBe(true);
       expect(result.answerText).toBe("hi");
       expect(runLog).toEqual(["remote"]);
+      expect(browserConfigs[0]).toMatchObject({
+        desiredModel: "Use latest model",
+        modelStrategy: "select",
+        thinkingTime: "extended",
+        manualLogin: false,
+        manualLoginProfileDir: null,
+        manualLoginCookieSync: false,
+      });
 
       const healthUnauthorized = await httpGetJson({
         hostname: "127.0.0.1",

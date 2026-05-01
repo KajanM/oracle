@@ -389,6 +389,9 @@ export async function createRemoteServer(
         payload!.browserConfig.manualLogin = false;
         payload!.browserConfig.manualLoginProfileDir = null;
         payload!.browserConfig.manualLoginCookieSync = false;
+        payload!.browserConfig.desiredModel = "Use latest model";
+        payload!.browserConfig.modelStrategy = "select";
+        payload!.browserConfig.thinkingTime = "extended";
 
         const result = await runBrowser({
           prompt: payload!.prompt,
