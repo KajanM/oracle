@@ -146,6 +146,11 @@ export async function buildBrowserConfig(
     : shouldUseOverride
       ? desiredModelOverride
       : mapModelToBrowserLabel(options.model);
+  const thinkingTime =
+    options.browserThinkingTime ??
+    (modelStrategy === "select" && shouldForceProComposerMode(desiredModel)
+      ? "extended"
+      : undefined);
 
   if (
     modelStrategy === "select" &&
@@ -210,8 +215,12 @@ export async function buildBrowserConfig(
     // Allow cookie failures by default so runs can continue without Chrome/Keychain secrets.
     allowCookieErrors: options.browserAllowCookieErrors ?? true,
     remoteChrome,
-    thinkingTime: options.browserThinkingTime,
+    thinkingTime,
   };
+}
+
+function shouldForceProComposerMode(desiredModel: string | undefined): boolean {
+  return /\bpro\b/i.test(desiredModel ?? "") || /use latest model/i.test(desiredModel ?? "");
 }
 
 function selectBrowserPort(options: BrowserFlagOptions): number | null {

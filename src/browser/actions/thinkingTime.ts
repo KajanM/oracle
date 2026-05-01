@@ -133,20 +133,31 @@ function buildThinkingTimeExpression(level: ThinkingTimeLevel): string {
       .replace(/\\s+/g, ' ')
       .trim();
 
+    const isVisible = (node) => {
+      if (!(node instanceof HTMLElement)) return false;
+      const rect = node.getBoundingClientRect();
+      const style = getComputedStyle(node);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+    };
+
+    const modeTriggerLabels = ['thinking', 'pro', 'instant', 'standard', 'extended', 'heavy', 'light'];
+    const targetAliases = {
+      light: ['light'],
+      standard: ['standard'],
+      extended: ['pro', 'extended', 'thinking'],
+      heavy: ['heavy'],
+    }[TARGET_LEVEL] ?? [TARGET_LEVEL];
+
     const findThinkingChip = () => {
       for (const selector of CHIP_SELECTORS) {
         const buttons = document.querySelectorAll(selector);
         for (const btn of buttons) {
           // Skip toggle buttons (no haspopup) - only click dropdown triggers to avoid disabling Pro mode
           if (btn.getAttribute?.('aria-haspopup') !== 'menu') continue;
+          if (!isVisible(btn)) continue;
           const aria = normalize(btn.getAttribute?.('aria-label') ?? '');
           const text = normalize(btn.textContent ?? '');
-          if (aria.includes('thinking') || text.includes('thinking')) {
-            return btn;
-          }
-
-          // In some cases the pill is labeled "Pro".
-          if (aria.includes('pro') || text.includes('pro')) {
+          if (modeTriggerLabels.some((label) => aria.includes(label) || text.includes(label))) {
             return btn;
           }
         }
@@ -172,7 +183,9 @@ function buildThinkingTimeExpression(level: ThinkingTimeLevel): string {
             return menu;
           }
           const text = normalize(menu.textContent ?? '');
-          if (text.includes('standard') && text.includes('extended')) {
+          if ((text.includes('standard') && text.includes('extended')) ||
+              (text.includes('instant') && text.includes('pro')) ||
+              (text.includes('instant') && text.includes('thinking'))) {
             return menu;
           }
         }
@@ -181,10 +194,12 @@ function buildThinkingTimeExpression(level: ThinkingTimeLevel): string {
 
       const findTargetOption = (menu) => {
         const items = menu.querySelectorAll(MENU_ITEM_SELECTOR);
-        for (const item of items) {
-          const text = normalize(item.textContent ?? '');
-          if (text.includes(TARGET_LEVEL)) {
-            return item;
+        for (const label of targetAliases) {
+          for (const item of items) {
+            const text = normalize(item.textContent ?? '');
+            if (text.includes(label)) {
+              return item;
+            }
           }
         }
         return null;

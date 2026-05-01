@@ -16,6 +16,7 @@ describe("buildBrowserConfig", () => {
       keepBrowser: undefined,
       hideWindow: undefined,
       desiredModel: "Use latest model",
+      thinkingTime: "extended",
       debug: undefined,
       allowCookieErrors: true,
     });
@@ -32,6 +33,16 @@ describe("buildBrowserConfig", () => {
       browserModelStrategy: "current",
     });
     expect(config.modelStrategy).toBe("current");
+    expect(config.thinkingTime).toBeUndefined();
+  });
+
+  test("honors explicit browser thinking time", async () => {
+    const config = await buildBrowserConfig({
+      model: "gpt-5.2-pro",
+      browserThinkingTime: "standard",
+    });
+    expect(config.desiredModel).toBe("Use latest model");
+    expect(config.thinkingTime).toBe("standard");
   });
 
   test("honors overrides and converts durations + booleans", async () => {

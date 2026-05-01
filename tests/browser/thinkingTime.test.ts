@@ -13,6 +13,16 @@ describe("browser thinking-time selection expression", () => {
     expect(expression).toContain("normalize");
     expect(expression).toContain("extended");
     expect(expression).toContain("standard");
+    expect(expression).toContain("instant");
+    expect(expression).toContain("isVisible");
+  });
+
+  it("can open the current Instant composer mode pill", () => {
+    const expression = buildThinkingTimeExpressionForTest("extended");
+    expect(expression).toContain("modeTriggerLabels");
+    expect(expression).toContain("instant");
+    expect(expression).toContain("targetAliases");
+    expect(expression).toContain("pro");
   });
 
   it("targets the requested thinking time level", () => {
