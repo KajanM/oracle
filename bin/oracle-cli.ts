@@ -244,7 +244,7 @@ program.hook("preAction", (thisCommand) => {
 program
   .name("oracle")
   .description(
-    "One-shot GPT-5.4 Pro / GPT-5.4 / GPT-5.1 Codex tool for hard questions that benefit from large file context and server-side search.",
+    "One-shot latest ChatGPT Pro browser / API model tool for hard questions that benefit from large file context and server-side search.",
   )
   .version(VERSION)
   .argument("[prompt]", "Prompt text (shorthand for --prompt).")
@@ -298,7 +298,7 @@ program
   .option("-s, --slug <words>", "Custom session slug (3-5 words).")
   .option(
     "-m, --model <model>",
-    'Model to target (gpt-5.4-pro default). Also gpt-5.4, gpt-5.1-pro, gpt-5-pro, gpt-5.1, gpt-5.1-codex API-only, gpt-5.2, gpt-5.2-instant, gpt-5.2-pro, gemini-3.1-pro API-only, gemini-3-pro, claude-4.5-sonnet, claude-4.1-opus, or ChatGPT labels like "5.2 Thinking" for browser runs).',
+    'Model to target. Browser Pro aliases select ChatGPT Latest (currently Pro 5.5); API built-ins include gpt-5.4-pro default, gpt-5.4, gpt-5.1-pro, gpt-5-pro, gpt-5.1, gpt-5.1-codex API-only, gpt-5.2, gpt-5.2-instant, gpt-5.2-pro, gemini-3.1-pro API-only, gemini-3-pro, claude-4.5-sonnet, claude-4.1-opus, or ChatGPT labels like "Latest" / "5.5 Pro" for browser runs.',
     normalizeModelOption,
   )
   .addOption(
@@ -342,7 +342,7 @@ program
   .addOption(
     new Option(
       "--timeout <seconds|auto>",
-      "Overall timeout before aborting the API call (auto = 60m for gpt-5.4-pro, 120s otherwise).",
+      "Overall timeout before aborting the API call (auto = 60m for Pro API models, 120s otherwise).",
     )
       .argParser(parseTimeoutOption)
       .default("auto"),

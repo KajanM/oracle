@@ -23,14 +23,14 @@ const DEFAULT_CHROME_PROFILE = "Default";
 
 // Ordered array: most specific models first to ensure correct selection.
 // The browser label is passed to the model picker which fuzzy-matches against ChatGPT's UI.
-// March 2026 note: ChatGPT's header can still show "ChatGPT 5.2" even when the account default is
-// effectively "latest" / Pro via the composer footer chip. Keep browser-side mappings aligned with
-// the live picker labels instead of assuming the header text is the source of truth.
-// The current "latest" GPT-5.4 Pro path is exposed as "Use latest model", while the plain "Pro"
-// row can land on the legacy 5.2-backed Pro variant.
+// ChatGPT's header can lag the selected model; the account default is exposed through the model
+// picker as "Latest" / "Use latest model" and the composer footer chip carries thinking effort.
+// Keep browser-side mappings aligned with live picker labels instead of assuming a fixed model name.
 const BROWSER_MODEL_LABELS: [ModelName, string][] = [
   // Most specific first (e.g., "gpt-5.2-thinking" before "gpt-5.2")
+  ["gpt-5.5-pro", "Use latest model"],
   ["gpt-5.4-pro", "Use latest model"],
+  ["gpt-5.5", "Thinking"],
   ["gpt-5.2-thinking", "Thinking"],
   ["gpt-5.2-instant", "Instant"],
   ["gpt-5.2-pro", "Use latest model"],
@@ -85,13 +85,18 @@ export function normalizeChatGptModelForBrowser(model: ModelName): ModelName {
     return model;
   }
 
-  if (normalized === "gpt-5.4-pro" || normalized === "gpt-5.4") {
+  if (normalized === "gpt-5.5-pro" || normalized === "gpt-5.5" || normalized === "gpt-5.4") {
     return normalized;
   }
 
   // Pro variants: resolve to the latest Pro model in ChatGPT.
-  if (normalized === "gpt-5-pro" || normalized === "gpt-5.1-pro" || normalized === "gpt-5.2-pro") {
-    return "gpt-5.4-pro";
+  if (
+    normalized === "gpt-5.4-pro" ||
+    normalized === "gpt-5-pro" ||
+    normalized === "gpt-5.1-pro" ||
+    normalized === "gpt-5.2-pro"
+  ) {
+    return "gpt-5.5-pro";
   }
 
   // Explicit model variants: keep as-is (they have their own browser labels)

@@ -218,6 +218,9 @@ export function resolveApiModel(modelValue: string): ModelName {
   if (normalized.includes("5.4")) {
     return "gpt-5.4";
   }
+  if (normalized.includes("5.5") || normalized.includes("5_5")) {
+    return normalized as ModelName;
+  }
   if (normalized === "claude" || normalized === "sonnet" || /(^|\b)sonnet(\b|$)/.test(normalized)) {
     return "claude-4.5-sonnet";
   }
@@ -265,7 +268,7 @@ export function resolveApiModel(modelValue: string): ModelName {
 export function inferModelFromLabel(modelValue: string): ModelName {
   const normalized = normalizeModelOption(modelValue).toLowerCase();
   if (!normalized) {
-    return DEFAULT_MODEL;
+    return "gpt-5.5-pro" as ModelName;
   }
   if (normalized in MODEL_CONFIGS) {
     return normalized as ModelName;
@@ -297,11 +300,20 @@ export function inferModelFromLabel(modelValue: string): ModelName {
   if (normalized.includes("classic")) {
     return "gpt-5-pro";
   }
+  if (normalized === "latest" || normalized === "auto-latest") {
+    return "gpt-5.5-pro" as ModelName;
+  }
   if ((normalized.includes("5.4") || normalized.includes("5_4")) && normalized.includes("pro")) {
     return "gpt-5.4-pro";
   }
   if (normalized.includes("5.4") || normalized.includes("5_4")) {
     return "gpt-5.4";
+  }
+  if ((normalized.includes("5.5") || normalized.includes("5_5")) && normalized.includes("pro")) {
+    return "gpt-5.5-pro" as ModelName;
+  }
+  if (normalized.includes("5.5") || normalized.includes("5_5")) {
+    return "gpt-5.5" as ModelName;
   }
   if ((normalized.includes("5.2") || normalized.includes("5_2")) && normalized.includes("pro")) {
     return "gpt-5.2-pro";
@@ -327,7 +339,8 @@ export function inferModelFromLabel(modelValue: string): ModelName {
     normalized.includes("pro") &&
     !normalized.includes("5.1") &&
     !normalized.includes("5.2") &&
-    !normalized.includes("5.4")
+    !normalized.includes("5.4") &&
+    !normalized.includes("5.5")
   ) {
     return "gpt-5-pro";
   }
@@ -335,7 +348,7 @@ export function inferModelFromLabel(modelValue: string): ModelName {
     return "gpt-5.1-pro";
   }
   if (normalized.includes("pro")) {
-    return DEFAULT_MODEL;
+    return "gpt-5.5-pro" as ModelName;
   }
   if (normalized.includes("5.1") || normalized.includes("5_1")) {
     return "gpt-5.1";

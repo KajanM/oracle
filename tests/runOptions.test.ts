@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { resolveRunOptionsFromConfig } from "../src/cli/runOptions.js";
 import { estimateRequestTokens } from "../src/oracle/tokenEstimate.js";
-import { DEFAULT_MODEL, MODEL_CONFIGS } from "../src/oracle/config.js";
+import { MODEL_CONFIGS } from "../src/oracle/config.js";
 
 describe("resolveRunOptionsFromConfig", () => {
   const basePrompt = "This prompt is comfortably above twenty characters.";
@@ -24,11 +24,11 @@ describe("resolveRunOptionsFromConfig", () => {
     expect(resolvedEngine).toBe("api");
   });
 
-  it("defaults to gpt-5.4-pro when model not provided", () => {
+  it("defaults browser runs to the latest ChatGPT Pro target when model not provided", () => {
     const { runOptions } = resolveRunOptionsFromConfig({
       prompt: basePrompt,
     });
-    expect(runOptions.model).toBe(DEFAULT_MODEL);
+    expect(runOptions.model).toBe("gpt-5.5-pro");
   });
 
   it("uses config model when caller does not provide one", () => {
@@ -173,14 +173,14 @@ describe("resolveRunOptionsFromConfig", () => {
     expect(runOptions.model).toBe("gpt-5.2");
   });
 
-  it("maps browser engine Pro aliases to gpt-5.4-pro", () => {
+  it("maps browser engine Pro aliases to the latest ChatGPT Pro target", () => {
     const { resolvedEngine, runOptions } = resolveRunOptionsFromConfig({
       prompt: basePrompt,
       model: "gpt-5.1-pro",
       engine: "browser",
     });
     expect(resolvedEngine).toBe("browser");
-    expect(runOptions.model).toBe("gpt-5.4-pro");
+    expect(runOptions.model).toBe("gpt-5.5-pro");
   });
 
   it("forces api engine for gpt-5.1-codex when engine is auto-detected", () => {

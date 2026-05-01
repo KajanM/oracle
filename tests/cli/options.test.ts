@@ -161,6 +161,7 @@ describe("normalizeModelOption", () => {
 describe("resolveApiModel", () => {
   test("accepts canonical names regardless of case", () => {
     expect(resolveApiModel("gpt-5.4-pro")).toBe("gpt-5.4-pro");
+    expect(resolveApiModel("gpt-5.5-pro")).toBe("gpt-5.5-pro");
     expect(resolveApiModel("GPT-5.4")).toBe("gpt-5.4");
     expect(resolveApiModel("gpt-5.2-pro")).toBe("gpt-5.2-pro");
     expect(resolveApiModel("GPT-5.0-PRO")).toBe("gpt-5-pro");
@@ -224,6 +225,12 @@ describe("inferModelFromLabel", () => {
     expect(inferModelFromLabel("5_4 PRO")).toBe("gpt-5.4-pro");
   });
 
+  test("infers 5.5 variants for browser labels", () => {
+    expect(inferModelFromLabel("ChatGPT 5.5")).toBe("gpt-5.5");
+    expect(inferModelFromLabel("GPT-5.5 Pro")).toBe("gpt-5.5-pro");
+    expect(inferModelFromLabel("5_5 PRO")).toBe("gpt-5.5-pro");
+  });
+
   test("infers 5.1 variants as gpt-5.1", () => {
     expect(inferModelFromLabel("ChatGPT 5.1 Instant")).toBe("gpt-5.1");
     expect(inferModelFromLabel("5.1 thinking")).toBe("gpt-5.1");
@@ -246,7 +253,8 @@ describe("inferModelFromLabel", () => {
   });
 
   test("falls back to pro when the label references pro", () => {
-    expect(inferModelFromLabel("ChatGPT Pro")).toBe("gpt-5.4-pro");
+    expect(inferModelFromLabel("ChatGPT Pro")).toBe("gpt-5.5-pro");
+    expect(inferModelFromLabel("latest")).toBe("gpt-5.5-pro");
     expect(inferModelFromLabel("GPT-5.2 Pro")).toBe("gpt-5.2-pro");
     expect(inferModelFromLabel("GPT-5 Pro (Classic)")).toBe("gpt-5-pro");
   });
@@ -262,8 +270,8 @@ describe("inferModelFromLabel", () => {
     expect(inferModelFromLabel("Grok-4-1")).toBe("grok-4.1");
   });
 
-  test("falls back to gpt-5.4-pro when label empty and to gpt-5.2 for other ambiguous strings", () => {
-    expect(inferModelFromLabel("")).toBe("gpt-5.4-pro");
+  test("falls back to latest Pro when label empty and to gpt-5.2 for other ambiguous strings", () => {
+    expect(inferModelFromLabel("")).toBe("gpt-5.5-pro");
     expect(inferModelFromLabel("something else")).toBe("gpt-5.2");
   });
 });

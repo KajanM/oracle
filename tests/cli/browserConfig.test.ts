@@ -212,6 +212,8 @@ describe("buildBrowserConfig", () => {
 describe("resolveBrowserModelLabel", () => {
   test("returns canonical ChatGPT label when CLI value matches API model", () => {
     expect(resolveBrowserModelLabel("gpt-5.4-pro", "gpt-5.4-pro")).toBe("Use latest model");
+    expect(resolveBrowserModelLabel("gpt-5.5-pro", "gpt-5.5-pro")).toBe("Use latest model");
+    expect(resolveBrowserModelLabel("gpt-5.5", "gpt-5.5")).toBe("Thinking");
     expect(resolveBrowserModelLabel("gpt-5.4", "gpt-5.4")).toBe("Thinking");
     expect(resolveBrowserModelLabel("gpt-5-pro", "gpt-5-pro")).toBe("Use latest model");
     expect(resolveBrowserModelLabel("gpt-5.2-pro", "gpt-5.2-pro")).toBe("Use latest model");

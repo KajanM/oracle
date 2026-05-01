@@ -1,7 +1,7 @@
 import type { BrowserModelStrategy } from "./types.js";
 
 export const CHATGPT_URL = "https://chatgpt.com/";
-export const DEFAULT_MODEL_TARGET = "GPT-5.4 Pro";
+export const DEFAULT_MODEL_TARGET = "Use latest model";
 export const DEFAULT_MODEL_STRATEGY: BrowserModelStrategy = "select";
 export const COOKIE_URLS = [
   "https://chatgpt.com",
@@ -42,7 +42,7 @@ export const ASSISTANT_ROLE_SELECTOR =
 export const CLOUDFLARE_SCRIPT_SELECTOR = 'script[src*="/challenge-platform/"]';
 export const CLOUDFLARE_TITLE = "just a moment";
 export const PROMPT_PRIMARY_SELECTOR = "#prompt-textarea";
-export const PROMPT_FALLBACK_SELECTOR = '.ProseMirror';
+export const PROMPT_FALLBACK_SELECTOR = ".ProseMirror";
 export const FILE_INPUT_SELECTORS = [
   'form input[type="file"]:not([accept])',
   'input[type="file"][multiple]:not([accept])',
@@ -60,7 +60,7 @@ export const GENERIC_FILE_INPUT_SELECTOR = FILE_INPUT_SELECTORS[3];
 // and scan options without toggling the trigger closed.
 export const MENU_CONTAINER_SELECTOR =
   '[role="menu"], [data-radix-collection-root], [data-radix-dropdown-menu-content], ' +
-  '[data-radix-menu-content], [data-radix-select-content], [data-radix-popper-content-wrapper]';
+  "[data-radix-menu-content], [data-radix-select-content], [data-radix-popper-content-wrapper]";
 export const MENU_ITEM_SELECTOR =
   'button, [role="menuitem"], [role="menuitemradio"], [data-testid*="model-switcher-"]';
 export const UPLOAD_STATUS_SELECTORS = [
@@ -78,11 +78,11 @@ export const STOP_BUTTON_SELECTOR = '[data-testid="stop-button"]';
 // When the stop button disappears, the composer submit area shows a voice or send button.
 // Checking the composer button's aria-label is more reliable than just checking for the
 // stop button's DOM presence, which can persist in the DOM even when not visually active.
-export const COMPOSER_SUBMIT_BUTTON_SELECTOR = '#composer-submit-button';
+export const COMPOSER_SUBMIT_BUTTON_SELECTOR = "#composer-submit-button";
 export const SEND_BUTTON_SELECTORS = [
   'button[data-testid="send-button"]',
   'button[aria-label*="Send"]',
-  'button.composer-submit-btn',
+  "button.composer-submit-btn",
   'button[data-testid*="composer-send"]',
   'form button[type="submit"]',
 ];
