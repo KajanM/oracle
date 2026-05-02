@@ -1246,6 +1246,21 @@ function buildModelSelectionExpression(
         await sleep(INITIAL_WAIT_MS);
 
         const attempt = async () => {
+        const directTestId = TEST_IDS.find((id) => id && id.startsWith('model-switcher-'));
+        if (directTestId) {
+          const direct = document.querySelector('[data-testid="' + directTestId.replace(/"/g, '\\"') + '"]');
+          if (direct instanceof HTMLElement) {
+            clickPickerRow(direct);
+            setTimeout(() => {
+              resolve({
+                status: 'switched-best-effort',
+                label: direct.textContent?.trim() || PRIMARY_LABEL,
+                modelPickerInstrumentation: { reopenTriggerClicks },
+              });
+            }, 150);
+            return;
+          }
+        }
         const match = findBestOption();
         if (match) {
           if (optionIsSelected(match.node)) {
