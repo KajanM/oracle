@@ -11,6 +11,12 @@
 - Behavior: starts a session, runs it with the chosen engine, returns final output + metadata. Background/foreground follows the CLI (e.g., GPT‑5 Pro detaches by default).
 - Logging: emits MCP logs (`info` per line, `debug` for streamed chunks with byte sizes). If browser prerequisites are missing, returns an error payload instead of running.
 
+### `imagine`
+
+- Inputs: `prompt` (required), `files?: string[]` (optional reference files/images), `slug?: string`, `browserKeepBrowser?: boolean`, `browserConversationUrl?: string`.
+- Behavior: browser-only ChatGPT image generation. It selects the ChatGPT `Thinking` model row, opens the composer plus menu, enables `Create image`, sends the prompt, captures generated-image elements, and saves downloaded images under `~/.oracle/sessions/<session>/images/`.
+- Output: returns the session id, status, text tail, and saved image paths.
+
 ### `sessions`
 
 - Inputs: `{id?, hours?, limit?, includeAll?, detail?}` mirroring `oracle status` / `oracle session`.

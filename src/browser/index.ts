@@ -45,6 +45,12 @@ import {
 import { INPUT_SELECTORS } from "./constants.js";
 import { uploadAttachmentViaDataTransfer } from "./actions/remoteFileTransfer.js";
 import { ensureThinkingTime } from "./actions/thinkingTime.js";
+import { ensureCreateImageMode } from "./actions/createImageMode.js";
+import {
+  collectGeneratedImages,
+  countGeneratedImages,
+  waitForNewGeneratedImage,
+} from "./actions/generatedImages.js";
 import { estimateTokenCount, withRetries, delay } from "./utils.js";
 import { formatElapsed } from "../oracle/format.js";
 import { CHATGPT_URL, CONVERSATION_TURN_SELECTOR, DEFAULT_MODEL_STRATEGY } from "./constants.js";
@@ -545,6 +551,11 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
         `[browser] [phase] thinking-time — ${Date.now() - thinkStartMs}ms level=${thinkingTime}`,
       );
     }
+    if (config.createImageMode) {
+      const imageModeStartMs = Date.now();
+      await raceWithDisconnect(ensureCreateImageMode(Runtime, Input, logger));
+      logger(`[browser] [phase] create-image-mode — ${Date.now() - imageModeStartMs}ms`);
+    }
     const profileLockTimeoutMs = manualLogin ? (config.profileLockTimeoutMs ?? 0) : 0;
     let profileLock: ProfileRunLock | null = null;
     const acquireProfileLockIfNeeded = async () => {
@@ -672,6 +683,9 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
 
     let baselineTurns: number | null = null;
     let baselineAssistantText: string | null = null;
+    const baselineGeneratedImageCount = config.captureGeneratedImages
+      ? await countGeneratedImages(Runtime).catch(() => 0)
+      : 0;
     await acquireProfileLockIfNeeded();
     try {
       try {
@@ -803,14 +817,28 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
       `[browser] [lifecycle] waiting for assistant response — timeout=${config.timeoutMs}ms baseline_turns=${baselineTurns ?? "none"}`,
     );
     try {
+      const assistantWait = waitForAssistantResponseWithReload(
+        Runtime,
+        Page,
+        config.timeoutMs,
+        logger,
+        baselineTurns ?? undefined,
+      );
+      const imageWait =
+        config.captureGeneratedImages && config.createImageMode
+          ? waitForNewGeneratedImage(
+              Runtime,
+              baselineGeneratedImageCount,
+              config.timeoutMs,
+              logger,
+            ).then(() => ({
+              text: "",
+              html: undefined,
+              meta: {},
+            }))
+          : null;
       answer = await raceWithDisconnect(
-        waitForAssistantResponseWithReload(
-          Runtime,
-          Page,
-          config.timeoutMs,
-          logger,
-          baselineTurns ?? undefined,
-        ),
+        imageWait ? Promise.race([assistantWait, imageWait]) : assistantWait,
       );
       const waitElapsed = Math.round((Date.now() - waitStartMs) / 1000);
       logger(
@@ -1051,6 +1079,16 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
     const durationMs = Date.now() - startedAt;
     const answerChars = answerText.length;
     const answerTokens = estimateTokenCount(answerMarkdown);
+    const generatedImages = config.captureGeneratedImages
+      ? await collectGeneratedImages(Runtime, logger).catch((error) => {
+          logger(
+            `[browser] [image] generated image capture failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+          return [];
+        })
+      : [];
     return {
       answerText,
       answerMarkdown,
@@ -1065,6 +1103,7 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
       chromeTargetId: lastTargetId,
       tabUrl: lastUrl,
       controllerPid: process.pid,
+      generatedImages,
     };
   } catch (error) {
     const normalizedError = error instanceof Error ? error : new Error(String(error));
@@ -1556,6 +1595,10 @@ async function runRemoteBrowserMode(
         },
       });
     }
+    if (config.createImageMode) {
+      await ensureCreateImageMode(Runtime, Input, logger);
+      logger("Create image mode enabled");
+    }
 
     const submitOnce = async (prompt: string, submissionAttachments: BrowserAttachment[]) => {
       const baselineSnapshot = await readAssistantSnapshot(Runtime).catch(() => null);
@@ -1607,6 +1650,9 @@ async function runRemoteBrowserMode(
 
     let baselineTurns: number | null = null;
     let baselineAssistantText: string | null = null;
+    const baselineGeneratedImageCount = config.captureGeneratedImages
+      ? await countGeneratedImages(Runtime).catch(() => 0)
+      : 0;
     try {
       const submission = await submitOnce(promptText, attachments);
       baselineTurns = submission.baselineTurns;
@@ -1725,13 +1771,27 @@ async function runRemoteBrowserMode(
       return rechecked;
     };
     try {
-      answer = await waitForAssistantResponseWithReload(
+      const assistantWait = waitForAssistantResponseWithReload(
         Runtime,
         Page,
         config.timeoutMs,
         logger,
         baselineTurns ?? undefined,
       );
+      const imageWait =
+        config.captureGeneratedImages && config.createImageMode
+          ? waitForNewGeneratedImage(
+              Runtime,
+              baselineGeneratedImageCount,
+              config.timeoutMs,
+              logger,
+            ).then(() => ({
+              text: "",
+              html: undefined,
+              meta: {},
+            }))
+          : null;
+      answer = await (imageWait ? Promise.race([assistantWait, imageWait]) : assistantWait);
     } catch (error) {
       if (isAssistantResponseTimeoutError(error)) {
         const rechecked = await attemptAssistantRecheck().catch(() => null);
@@ -1887,6 +1947,16 @@ async function runRemoteBrowserMode(
     const durationMs = Date.now() - startedAt;
     const answerChars = answerText.length;
     const answerTokens = estimateTokenCount(answerMarkdown);
+    const generatedImages = config.captureGeneratedImages
+      ? await collectGeneratedImages(Runtime, logger).catch((error) => {
+          logger(
+            `[browser] [image] generated image capture failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+          return [];
+        })
+      : [];
 
     return {
       answerText,
@@ -1902,6 +1972,7 @@ async function runRemoteBrowserMode(
       chromeTargetId: remoteTargetId ?? undefined,
       tabUrl: lastUrl,
       controllerPid: process.pid,
+      generatedImages,
     };
   } catch (error) {
     const normalizedError = error instanceof Error ? error : new Error(String(error));

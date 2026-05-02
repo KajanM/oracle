@@ -43,7 +43,7 @@ import { readFiles } from "../oracle/files.js";
 import { cwd as getCwd } from "node:process";
 import { resumeBrowserSession } from "../browser/reattach.js";
 import { estimateTokenCount } from "../browser/utils.js";
-import type { BrowserLogger } from "../browser/types.js";
+import type { BrowserGeneratedImage, BrowserLogger } from "../browser/types.js";
 import { formatElapsed } from "../oracle/format.js";
 
 const isTty = process.stdout.isTTY;
@@ -135,6 +135,14 @@ export async function performSessionRun({
         error: undefined,
       });
       await persistBrowserAssistantOutput(sessionMeta.id, result.answerText ?? "", modelForStatus);
+      const generatedImagePaths = await persistGeneratedImages(
+        sessionMeta.id,
+        result.generatedImages ?? [],
+        log,
+      );
+      if (generatedImagePaths.length > 0) {
+        await appendGeneratedImagePaths(sessionMeta.id, generatedImagePaths, modelForStatus);
+      }
       await writeAssistantOutput(runOptions.writeOutputPath, result.answerText ?? "", log);
       await sendSessionNotification(
         {
@@ -595,6 +603,57 @@ async function closeSessionLogWriter(writer: SessionLogWriter): Promise<void> {
       resolve();
     });
   });
+}
+
+async function persistGeneratedImages(
+  sessionId: string,
+  images: BrowserGeneratedImage[],
+  log: (message: string) => void,
+): Promise<string[]> {
+  if (images.length === 0) return [];
+  const paths = await sessionStore.getPaths(sessionId);
+  const imageDir = path.join(paths.dir, "images");
+  await fs.mkdir(imageDir, { recursive: true });
+  const saved: string[] = [];
+  for (const [index, image] of images.entries()) {
+    if (!image.dataBase64) continue;
+    const ext = extensionForMimeType(image.mimeType);
+    const outputPath = path.join(imageDir, image.fileName ?? `generated-image-${index + 1}${ext}`);
+    await fs.writeFile(outputPath, Buffer.from(image.dataBase64, "base64"));
+    saved.push(outputPath);
+  }
+  if (saved.length > 0) {
+    log(
+      dim(`Saved ${saved.length} generated image${saved.length === 1 ? "" : "s"} to ${imageDir}`),
+    );
+  }
+  return saved;
+}
+
+async function appendGeneratedImagePaths(
+  sessionId: string,
+  imagePaths: string[],
+  model?: string,
+): Promise<void> {
+  const lines = ["", "Generated images:", ...imagePaths.map((imagePath) => `- ${imagePath}`)];
+  const writePaths = async (writer: SessionLogWriter) => {
+    for (const line of lines) {
+      writer.logLine(line);
+    }
+    await closeSessionLogWriter(writer);
+  };
+  await writePaths(sessionStore.createLogWriter(sessionId));
+  if (model) {
+    await writePaths(sessionStore.createLogWriter(sessionId, model));
+  }
+}
+
+function extensionForMimeType(mimeType?: string): string {
+  const normalized = (mimeType ?? "").toLowerCase();
+  if (normalized.includes("jpeg") || normalized.includes("jpg")) return ".jpg";
+  if (normalized.includes("webp")) return ".webp";
+  if (normalized.includes("gif")) return ".gif";
+  return ".png";
 }
 
 function formatError(error: unknown): string {

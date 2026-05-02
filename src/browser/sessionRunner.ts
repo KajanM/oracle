@@ -5,6 +5,7 @@ import { formatFinishLine } from "../oracle/finishLine.js";
 import type { BrowserSessionConfig, BrowserRuntimeMetadata } from "../sessionStore.js";
 import { runBrowserMode } from "../browserMode.js";
 import type { BrowserRunResult } from "../browserMode.js";
+import type { BrowserGeneratedImage } from "./types.js";
 import { assembleBrowserPrompt } from "./prompt.js";
 import { BrowserAutomationError } from "../oracle/errors.js";
 import type { BrowserLogger } from "./types.js";
@@ -19,6 +20,7 @@ export interface BrowserExecutionResult {
   elapsedMs: number;
   runtime: BrowserRuntimeMetadata;
   answerText: string;
+  generatedImages?: BrowserGeneratedImage[];
 }
 
 interface RunBrowserSessionArgs {
@@ -170,5 +172,6 @@ export async function runBrowserSessionExecution(
       controllerPid: browserResult.controllerPid ?? process.pid,
     },
     answerText,
+    generatedImages: browserResult.generatedImages,
   };
 }

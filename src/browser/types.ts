@@ -18,6 +18,16 @@ export interface BrowserAttachment {
   sizeBytes?: number;
 }
 
+export interface BrowserGeneratedImage {
+  src: string;
+  alt?: string;
+  width?: number;
+  height?: number;
+  mimeType?: string;
+  dataBase64?: string;
+  fileName?: string;
+}
+
 export interface BrowserAutomationConfig {
   chromeProfile?: string | null;
   chromePath?: string | null;
@@ -59,6 +69,10 @@ export interface BrowserAutomationConfig {
   manualLoginCookieSync?: boolean;
   /** Thinking time intensity level for Thinking/Pro models: light, standard, extended, heavy */
   thinkingTime?: ThinkingTimeLevel;
+  /** Enable ChatGPT composer Create image mode before sending the prompt. */
+  createImageMode?: boolean;
+  /** Capture generated image elements from the assistant response. */
+  captureGeneratedImages?: boolean;
 }
 
 export interface BrowserRunOptions {
@@ -91,6 +105,7 @@ export interface BrowserRunResult {
   chromeTargetId?: string;
   tabUrl?: string;
   controllerPid?: number;
+  generatedImages?: BrowserGeneratedImage[];
 }
 
 export type ResolvedBrowserConfig = Required<

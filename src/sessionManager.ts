@@ -57,6 +57,10 @@ export interface BrowserSessionConfig {
   manualLoginCookieSync?: boolean;
   /** Thinking time intensity: 'light', 'standard', 'extended', 'heavy' */
   thinkingTime?: ThinkingTimeLevel;
+  /** Enable ChatGPT composer Create image mode before sending the prompt. */
+  createImageMode?: boolean;
+  /** Capture generated image elements from the assistant response. */
+  captureGeneratedImages?: boolean;
 }
 
 export interface BrowserRuntimeMetadata {

@@ -107,6 +107,55 @@ describe("remote browser service", () => {
     },
   );
 
+  test.skipIf(!CAN_LISTEN_LOCALHOST)(
+    "allows image-mode runs to use Thinking instead of the default Pro guard",
+    async () => {
+      const browserConfigs: Array<Record<string, unknown>> = [];
+      const server = await createRemoteServer(
+        { host: "127.0.0.1", port: 0, token: "secret", logger: () => {} },
+        {
+          runBrowser: async (options) => {
+            browserConfigs.push(options.config as Record<string, unknown>);
+            return {
+              answerText: "image",
+              answerMarkdown: "image",
+              tookMs: 1000,
+              answerTokens: 1,
+              answerChars: 5,
+              generatedImages: [],
+            };
+          },
+        },
+      );
+
+      const executor = createRemoteBrowserExecutor({
+        host: `127.0.0.1:${server.port}`,
+        token: "secret",
+      });
+      await executor({
+        prompt: "draw a cube",
+        attachments: [],
+        config: {
+          desiredModel: "Use latest model",
+          thinkingTime: "extended",
+          createImageMode: true,
+          captureGeneratedImages: true,
+        },
+      });
+
+      expect(browserConfigs[0]).toMatchObject({
+        desiredModel: "Thinking",
+        modelStrategy: "select",
+        createImageMode: true,
+        captureGeneratedImages: true,
+        manualLogin: false,
+      });
+      expect(browserConfigs[0]?.thinkingTime).toBeUndefined();
+
+      await server.close();
+    },
+  );
+
   test.skipIf(!CAN_LISTEN_LOCALHOST)("rejects runs over the concurrency cap", async () => {
     const previousCap = process.env.ORACLE_SERVE_MAX_CONCURRENT;
     process.env.ORACLE_SERVE_MAX_CONCURRENT = "1";

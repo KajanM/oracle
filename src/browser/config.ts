@@ -35,6 +35,8 @@ export const DEFAULT_BROWSER_CONFIG: ResolvedBrowserConfig = {
   manualLogin: false,
   manualLoginProfileDir: null,
   manualLoginCookieSync: false,
+  createImageMode: false,
+  captureGeneratedImages: false,
 };
 
 export function resolveBrowserConfig(
@@ -107,6 +109,8 @@ export function resolveBrowserConfig(
     manualLogin: false,
     manualLoginProfileDir: null,
     manualLoginCookieSync: false,
+    createImageMode: config?.createImageMode ?? false,
+    captureGeneratedImages: config?.captureGeneratedImages ?? false,
   };
 }
 
