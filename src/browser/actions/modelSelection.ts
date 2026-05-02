@@ -1182,7 +1182,10 @@ function buildModelSelectionExpression(
         for (const option of buttons) {
           const text = option.textContent ?? '';
           const normalizedText = normalizeText(text);
-          const testid = option.getAttribute('data-testid') ?? '';
+          const testid =
+            option.getAttribute('data-testid') ??
+            option.querySelector('[data-testid^="model-switcher-"]')?.getAttribute('data-testid') ??
+            '';
           const score = scoreOption(normalizedText, testid);
           if (score <= 0) {
             continue;
