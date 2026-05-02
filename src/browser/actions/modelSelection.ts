@@ -1249,12 +1249,19 @@ function buildModelSelectionExpression(
         const directTestId = TEST_IDS.find((id) => id && id.startsWith('model-switcher-'));
         if (directTestId) {
           const direct = document.querySelector('[data-testid="' + directTestId.replace(/"/g, '\\"') + '"]');
-          if (direct instanceof HTMLElement) {
-            clickPickerRow(direct);
+          if (direct instanceof Element) {
+            const directTarget =
+              direct instanceof HTMLElement
+                ? direct
+                : direct.closest('[role="menuitem"], [role="menuitemradio"], button, [data-testid*="model-switcher"]');
+            if (!(directTarget instanceof HTMLElement)) {
+              return;
+            }
+            clickPickerRow(directTarget);
             setTimeout(() => {
               resolve({
                 status: 'switched-best-effort',
-                label: direct.textContent?.trim() || PRIMARY_LABEL,
+                label: directTarget.textContent?.trim() || PRIMARY_LABEL,
                 modelPickerInstrumentation: { reopenTriggerClicks },
               });
             }, 150);
