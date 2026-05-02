@@ -23,33 +23,42 @@ export async function ensureCreateImageMode(
     throw new Error(`Unable to find ChatGPT composer plus button (${plus.reason ?? "missing"})`);
   }
 
-  if (input && typeof input.dispatchMouseEvent === "function") {
-    await input.dispatchMouseEvent({ type: "mouseMoved", x: plus.x, y: plus.y });
-    await input.dispatchMouseEvent({
-      type: "mousePressed",
-      x: plus.x,
-      y: plus.y,
-      button: "left",
-      clickCount: 1,
-    });
-    await input.dispatchMouseEvent({
-      type: "mouseReleased",
-      x: plus.x,
-      y: plus.y,
-      button: "left",
-      clickCount: 1,
-    });
-  } else {
-    await runtime.evaluate({
-      expression: `(() => {
-        const el = document.querySelector('#composer-plus-btn, button[data-testid="composer-plus-btn"], button[aria-label="Add files and more"]');
-        if (el instanceof HTMLElement) el.click();
-      })()`,
-    });
+  let clicked: LocatePoint = {
+    ok: false,
+    checked: false,
+    reason: "create-image-menu-item-not-found",
+  };
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (input && typeof input.dispatchMouseEvent === "function") {
+      await input.dispatchMouseEvent({ type: "mouseMoved", x: plus.x, y: plus.y });
+      await input.dispatchMouseEvent({
+        type: "mousePressed",
+        x: plus.x,
+        y: plus.y,
+        button: "left",
+        clickCount: 1,
+      });
+      await input.dispatchMouseEvent({
+        type: "mouseReleased",
+        x: plus.x,
+        y: plus.y,
+        button: "left",
+        clickCount: 1,
+      });
+    } else {
+      await clickComposerPlusButton(runtime);
+    }
+
+    clicked = await waitForCreateImageMenuItem(runtime, 1200);
+    if (clicked.ok || clicked.checked) break;
+
+    // Radix menus can ignore the first trusted click when focus has just moved back from the
+    // model picker. Follow with an in-page pointer sequence before retrying.
+    await clickComposerPlusButton(runtime);
+    clicked = await waitForCreateImageMenuItem(runtime, 1200);
+    if (clicked.ok || clicked.checked) break;
   }
 
-  await delay(250);
-  const clicked = await clickCreateImageMenuItem(runtime);
   if (!clicked.ok && !clicked.checked) {
     throw new Error(`Unable to enable ChatGPT Create image mode (${clicked.reason ?? "missing"})`);
   }
@@ -98,6 +107,43 @@ async function readCreateImageState(runtime: ChromeClient["Runtime"]): Promise<L
   return (result.value ?? {}) as LocatePoint;
 }
 
+async function clickComposerPlusButton(runtime: ChromeClient["Runtime"]): Promise<void> {
+  await runtime.evaluate({
+    expression: `(() => {
+      const el = document.querySelector('#composer-plus-btn, button[data-testid="composer-plus-btn"], button[aria-label="Add files and more"], button[aria-label*="Add files"]');
+      if (!(el instanceof HTMLElement)) return false;
+      const common = { bubbles: true, cancelable: true, view: window };
+      try {
+        el.dispatchEvent(new PointerEvent('pointerdown', { ...common, pointerId: 1, pointerType: 'mouse' }));
+      } catch {}
+      el.dispatchEvent(new MouseEvent('mousedown', common));
+      try {
+        el.click();
+      } catch {}
+      el.dispatchEvent(new MouseEvent('mouseup', common));
+      try {
+        el.dispatchEvent(new PointerEvent('pointerup', { ...common, pointerId: 1, pointerType: 'mouse' }));
+      } catch {}
+      return true;
+    })()`,
+    returnByValue: true,
+  });
+}
+
+async function waitForCreateImageMenuItem(
+  runtime: ChromeClient["Runtime"],
+  timeoutMs: number,
+): Promise<LocatePoint> {
+  const deadline = Date.now() + timeoutMs;
+  let last: LocatePoint = { ok: false, checked: false, reason: "create-image-menu-item-not-found" };
+  while (Date.now() < deadline) {
+    last = await clickCreateImageMenuItem(runtime);
+    if (last.ok || last.checked) return last;
+    await delay(100);
+  }
+  return last;
+}
+
 async function clickCreateImageMenuItem(runtime: ChromeClient["Runtime"]): Promise<LocatePoint> {
   const { result } = await runtime.evaluate({
     expression: buildCreateImageModeExpression("click"),
@@ -109,12 +155,32 @@ async function clickCreateImageMenuItem(runtime: ChromeClient["Runtime"]): Promi
 function buildCreateImageModeExpression(mode: "state" | "click" = "click"): string {
   return `(() => {
     const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
-    const candidates = Array.from(document.querySelectorAll('[role="menuitemradio"], [role="menuitem"], [data-radix-collection-item]'));
+    const isVisible = (node) => {
+      if (!(node instanceof HTMLElement)) return false;
+      const rect = node.getBoundingClientRect();
+      return rect.width > 2 && rect.height > 2;
+    };
+    const candidates = Array.from(document.querySelectorAll('[role="menuitemradio"], [role="menuitem"], [data-radix-collection-item], button'));
+    const available = candidates
+      .filter((node) => node instanceof HTMLElement && isVisible(node))
+      .map((node) => normalize(node.innerText || node.textContent))
+      .filter(Boolean)
+      .slice(0, 12);
     const item = candidates.find((node) => {
       if (!(node instanceof HTMLElement)) return false;
-      return normalize(node.innerText || node.textContent).includes('create image');
+      if (!isVisible(node)) return false;
+      const text = normalize(node.innerText || node.textContent);
+      return text.includes('create image') || (text.includes('image') && text.includes('create'));
     });
-    if (!item) return { ok: false, checked: false, reason: 'create-image-menu-item-not-found' };
+    if (!item) {
+      return {
+        ok: false,
+        checked: false,
+        reason: available.length > 0
+          ? 'create-image-menu-item-not-found; available=' + available.join(' | ')
+          : 'create-image-menu-item-not-found',
+      };
+    }
     const checked =
       item.getAttribute('aria-checked') === 'true' ||
       item.getAttribute('data-state') === 'checked';
