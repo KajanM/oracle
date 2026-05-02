@@ -1269,6 +1269,7 @@ function buildModelSelectionExpression(
             setTimeout(attempt, RETRY_WHEN_NO_MATCH_MS);
             return;
           }
+          const clickedModelSwitcher = (match.testid ?? '').toLowerCase().startsWith('model-switcher-');
           // Wait for the top bar label to reflect the requested model; otherwise keep scanning.
           setTimeout(() => {
             if (buttonMatchesTarget()) {
@@ -1276,6 +1277,14 @@ function buildModelSelectionExpression(
               resolve({
                 status: 'switched',
                 label: getButtonLabel() || match.label,
+                modelPickerInstrumentation: { reopenTriggerClicks },
+              });
+              return;
+            }
+            if (clickedModelSwitcher) {
+              resolve({
+                status: 'switched-best-effort',
+                label: match.label,
                 modelPickerInstrumentation: { reopenTriggerClicks },
               });
               return;
