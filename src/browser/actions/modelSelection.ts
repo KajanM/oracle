@@ -479,9 +479,22 @@ function buildTrustedModelProbeExpression(targetModel: string): string {
     const normalizedTokens = Array.from(new Set([normalizedTarget, ...LABEL_TOKENS]))
       .map((token) => normalizeText(token))
       .filter(Boolean);
+    const getTestId = (node) =>
+      (
+        node?.getAttribute?.('data-testid') ??
+        node?.querySelector?.('[data-testid^="model-switcher-"]')?.getAttribute('data-testid') ??
+        ''
+      ).toLowerCase();
+    const clickableFor = (node) => {
+      if (!(node instanceof Element)) return null;
+      return (
+        node.closest('[role="menuitem"], [role="menuitemradio"], button, [data-testid*="model-switcher"]') ??
+        node
+      );
+    };
     const score = (node) => {
       const text = normalizeText(node?.textContent ?? '');
-      const testid = (node?.getAttribute?.('data-testid') ?? '').toLowerCase();
+      const testid = getTestId(node);
       let total = 0;
       if (simpleTarget) {
         if (text === simpleTarget) total += 2000;
@@ -512,6 +525,28 @@ function buildTrustedModelProbeExpression(targetModel: string): string {
       .filter(Boolean)
       .filter((label, index, arr) => arr.indexOf(label) === index)
       .slice(0, 12);
+    for (const id of TEST_IDS) {
+      if (!id || !id.startsWith('model-switcher-')) continue;
+      const direct = menu.querySelector('[data-testid="' + String(id).replace(/"/g, '\\"') + '"]');
+      const clickable = clickableFor(direct);
+      if (!(clickable instanceof HTMLElement)) continue;
+      const rect = clickable.getBoundingClientRect();
+      if (rect.width < 4 || rect.height < 4) continue;
+      const selected =
+        clickable.getAttribute('aria-checked') === 'true' ||
+        clickable.getAttribute('aria-selected') === 'true' ||
+        clickable.getAttribute('aria-current') === 'true' ||
+        clickable.getAttribute('data-selected') === 'true' ||
+        Boolean(clickable.querySelector('[data-testid*="check"], [role="img"][data-icon="check"], svg[data-icon="check"]'));
+      match = {
+        score: 4000,
+        label: (clickable.textContent ?? '').trim(),
+        selected,
+        x: rect.left + rect.width / 2,
+        y: rect.top + rect.height / 2,
+      };
+      break;
+    }
     for (const option of options) {
       const optionScore = score(option);
       if (optionScore <= 0 || !(option instanceof HTMLElement)) continue;
@@ -545,9 +580,7 @@ function buildTrustedModelProbeExpression(targetModel: string): string {
           ((simpleTarget === 'pro' || simpleTarget === 'use latest model') &&
             text.includes('research grade'));
         if (!textLooksRight) continue;
-        const clickable =
-          node.closest('[role="menuitem"], [role="menuitemradio"], button, [data-testid*="model-switcher"]') ??
-          node;
+        const clickable = clickableFor(node);
         if (!(clickable instanceof HTMLElement)) continue;
         const rect = clickable.getBoundingClientRect();
         if (rect.width < 4 || rect.height < 4) continue;

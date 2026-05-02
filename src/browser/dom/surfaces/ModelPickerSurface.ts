@@ -48,8 +48,11 @@ export class ModelPickerSurface {
 
   async listOptions(): Promise<ModelPickerOption[]> {
     return this.session.withRepair("modelPicker", async () => {
-      await this.open();
-      const menu = await this.session.resolve("model.menu", { refresh: true });
+      let menu = await this.session.resolve("model.menu", { refresh: true });
+      if (!menu.ok || !menu.oracleId) {
+        await this.open();
+        menu = await this.session.resolve("model.menu", { refresh: true });
+      }
       if (!menu.ok || !menu.oracleId) {
         return [];
       }
