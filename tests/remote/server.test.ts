@@ -122,7 +122,14 @@ describe("remote browser service", () => {
               tookMs: 1000,
               answerTokens: 1,
               answerChars: 5,
-              generatedImages: [],
+              generatedImages: [
+                {
+                  src: "https://chatgpt.com/backend-api/estuary/content?id=file_1",
+                  alt: "Generated image",
+                  mimeType: "image/png",
+                  dataBase64: "aGVsbG8=",
+                },
+              ],
             };
           },
         },
@@ -132,7 +139,7 @@ describe("remote browser service", () => {
         host: `127.0.0.1:${server.port}`,
         token: "secret",
       });
-      await executor({
+      const result = await executor({
         prompt: "draw a cube",
         attachments: [],
         config: {
@@ -151,6 +158,8 @@ describe("remote browser service", () => {
         manualLogin: false,
       });
       expect(browserConfigs[0]?.thinkingTime).toBeUndefined();
+      expect(result.generatedImages).toHaveLength(1);
+      expect(result.generatedImages?.[0]?.dataBase64).toBe("aGVsbG8=");
 
       await server.close();
     },

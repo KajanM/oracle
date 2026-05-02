@@ -734,6 +734,7 @@ function sanitizeResult(result: BrowserRunResult): BrowserRunResult {
     tookMs: result.tookMs,
     answerTokens: result.answerTokens,
     answerChars: result.answerChars,
+    generatedImages: result.generatedImages,
     chromePid: undefined,
     chromePort: undefined,
     userDataDir: undefined,
