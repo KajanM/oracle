@@ -390,7 +390,7 @@ export async function createRemoteServer(
         payload!.browserConfig.manualLoginProfileDir = null;
         payload!.browserConfig.manualLoginCookieSync = false;
         if (payload!.browserConfig.createImageMode) {
-          payload!.browserConfig.desiredModel = "Thinking";
+          payload!.browserConfig.desiredModel = "GPT-5.5 Thinking";
           payload!.browserConfig.modelStrategy = "select";
           payload!.browserConfig.thinkingTime = undefined;
           payload!.browserConfig.captureGeneratedImages = true;

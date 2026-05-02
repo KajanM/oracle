@@ -108,7 +108,9 @@ export async function forceDismissOpenModelPicker(
       );
     }
   } catch (e) {
-    logger(`[browser] [model] warn: force-dismiss model picker failed: ${e instanceof Error ? e.message : e}`);
+    logger(
+      `[browser] [model] warn: force-dismiss model picker failed: ${e instanceof Error ? e.message : e}`,
+    );
   }
 }
 
@@ -205,11 +207,7 @@ export function buildClickProRowToCloseMenuExpression(): string {
   })()`;
 }
 
-async function cdpClickAt(
-  input: ChromeClient["Input"],
-  x: number,
-  y: number,
-): Promise<void> {
+async function cdpClickAt(input: ChromeClient["Input"], x: number, y: number): Promise<void> {
   await input.dispatchMouseEvent({ type: "mouseMoved", x, y });
   await input.dispatchMouseEvent({ type: "mousePressed", x, y, button: "left", clickCount: 1 });
   await input.dispatchMouseEvent({ type: "mouseReleased", x, y, button: "left", clickCount: 1 });
@@ -351,7 +349,9 @@ async function openModelPickerTrusted(
     })()`,
     returnByValue: true,
   });
-  const point = result?.value as { ok?: boolean; x?: number; y?: number; skip?: boolean } | undefined;
+  const point = result?.value as
+    | { ok?: boolean; x?: number; y?: number; skip?: boolean }
+    | undefined;
   if (!point?.ok || typeof point.x !== "number" || typeof point.y !== "number") {
     return Boolean(point?.skip);
   }
@@ -603,9 +603,21 @@ async function selectModelViaTrustedClicks(
   desiredModel: string,
   domContext?: ModelDomContext | null,
 ): Promise<
-  | { status: "already-selected"; label?: string | null; modelPickerInstrumentation?: { reopenTriggerClicks: number } }
-  | { status: "switched"; label?: string | null; modelPickerInstrumentation?: { reopenTriggerClicks: number } }
-  | { status: "option-not-found"; hint?: { temporaryChat?: boolean; availableOptions?: string[] }; modelPickerInstrumentation?: { reopenTriggerClicks: number } }
+  | {
+      status: "already-selected";
+      label?: string | null;
+      modelPickerInstrumentation?: { reopenTriggerClicks: number };
+    }
+  | {
+      status: "switched";
+      label?: string | null;
+      modelPickerInstrumentation?: { reopenTriggerClicks: number };
+    }
+  | {
+      status: "option-not-found";
+      hint?: { temporaryChat?: boolean; availableOptions?: string[] };
+      modelPickerInstrumentation?: { reopenTriggerClicks: number };
+    }
   | { status: "menu-not-open"; modelPickerInstrumentation?: { reopenTriggerClicks: number } }
 > {
   const opened = await openModelPickerTrusted(Runtime, input, domContext);
@@ -801,22 +813,36 @@ export async function ensureModelSelection(
       : null;
   const result = trustedResult
     ? trustedResult
-    : ((await Runtime.evaluate({
-        expression: buildModelSelectionExpression(desiredModel, strategy, false),
-        awaitPromise: true,
-        returnByValue: true,
-      })).result?.value as
-    | { status: "already-selected"; label?: string | null; modelPickerInstrumentation?: { reopenTriggerClicks: number } }
-    | { status: "switched"; label?: string | null; modelPickerInstrumentation?: { reopenTriggerClicks: number } }
-    | { status: "switched-best-effort"; label?: string | null; modelPickerInstrumentation?: { reopenTriggerClicks: number } }
-    | {
-        status: "option-not-found";
-        hint?: { temporaryChat?: boolean; availableOptions?: string[] };
-        modelPickerInstrumentation?: { reopenTriggerClicks: number };
-      }
-    | { status: "menu-not-open"; modelPickerInstrumentation?: { reopenTriggerClicks: number } }
-    | { status: "button-missing"; modelPickerInstrumentation?: { reopenTriggerClicks: number } }
-    | undefined);
+    : ((
+        await Runtime.evaluate({
+          expression: buildModelSelectionExpression(desiredModel, strategy, false),
+          awaitPromise: true,
+          returnByValue: true,
+        })
+      ).result?.value as
+        | {
+            status: "already-selected";
+            label?: string | null;
+            modelPickerInstrumentation?: { reopenTriggerClicks: number };
+          }
+        | {
+            status: "switched";
+            label?: string | null;
+            modelPickerInstrumentation?: { reopenTriggerClicks: number };
+          }
+        | {
+            status: "switched-best-effort";
+            label?: string | null;
+            modelPickerInstrumentation?: { reopenTriggerClicks: number };
+          }
+        | {
+            status: "option-not-found";
+            hint?: { temporaryChat?: boolean; availableOptions?: string[] };
+            modelPickerInstrumentation?: { reopenTriggerClicks: number };
+          }
+        | { status: "menu-not-open"; modelPickerInstrumentation?: { reopenTriggerClicks: number } }
+        | { status: "button-missing"; modelPickerInstrumentation?: { reopenTriggerClicks: number } }
+        | undefined);
 
   const reopen = result?.modelPickerInstrumentation?.reopenTriggerClicks ?? 0;
   if (reopen > 0) {
@@ -1336,6 +1362,28 @@ function buildModelMatchersLiteral(targetModel: string): {
     testIdTokens.add("gpt-5-4");
     testIdTokens.add("gpt5-4");
     testIdTokens.add("gpt54");
+  }
+  // Numeric variations (5.5 ↔ 55 ↔ gpt-5-5)
+  if (base.includes("5.5") || base.includes("5-5") || base.includes("55")) {
+    push("5.5", labelTokens);
+    push("gpt-5.5", labelTokens);
+    push("gpt5.5", labelTokens);
+    push("gpt-5-5", labelTokens);
+    push("gpt5-5", labelTokens);
+    push("gpt55", labelTokens);
+    push("chatgpt 5.5", labelTokens);
+    if (base.includes("thinking")) {
+      push("thinking", labelTokens);
+      testIdTokens.add("model-switcher-gpt-5-5-thinking");
+      testIdTokens.add("gpt-5-5-thinking");
+      testIdTokens.add("gpt-5.5-thinking");
+    }
+    if (!base.includes("pro") && !base.includes("thinking")) {
+      testIdTokens.add("model-switcher-gpt-5-5");
+    }
+    testIdTokens.add("gpt-5-5");
+    testIdTokens.add("gpt5-5");
+    testIdTokens.add("gpt55");
   }
   // Numeric variations (5.1 ↔ 51 ↔ gpt-5-1)
   if (base.includes("5.1") || base.includes("5-1") || base.includes("51")) {

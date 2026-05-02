@@ -56,6 +56,14 @@ describe("browser model selection matchers", () => {
     expect(testIdTokens).toContain("gpt-5.2-thinking");
   });
 
+  it("includes current thinking tokens for gpt-5.5-thinking", () => {
+    const { labelTokens, testIdTokens } = buildModelMatchersLiteralForTest("gpt-5.5-thinking");
+    expect(labelTokens.some((t) => t.includes("thinking"))).toBe(true);
+    expect(labelTokens.some((t) => t.includes("5.5") || t.includes("5-5"))).toBe(true);
+    expect(testIdTokens).toContain("model-switcher-gpt-5-5-thinking");
+    expect(testIdTokens).toContain("gpt-5.5-thinking");
+  });
+
   it("includes instant tokens for gpt-5.2-instant", () => {
     const { labelTokens, testIdTokens } = buildModelMatchersLiteralForTest("gpt-5.2-instant");
     expect(labelTokens.some((t) => t.includes("instant"))).toBe(true);

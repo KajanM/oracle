@@ -60,7 +60,7 @@ export function buildImagineBrowserConfig({
     manualLogin: false,
     manualLoginProfileDir: null,
     manualLoginCookieSync: false,
-    desiredModel: "Thinking",
+    desiredModel: "GPT-5.5 Thinking",
     modelStrategy: "select",
     thinkingTime: undefined,
     createImageMode: true,

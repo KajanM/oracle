@@ -20,7 +20,7 @@ describe("buildImagineBrowserConfig", () => {
       chatgptUrl: "https://chatgpt.com/g/g-p-foo/project",
       url: "https://chatgpt.com/g/g-p-foo/project",
       keepBrowser: true,
-      desiredModel: "Thinking",
+      desiredModel: "GPT-5.5 Thinking",
       modelStrategy: "select",
       createImageMode: true,
       captureGeneratedImages: true,

@@ -144,7 +144,7 @@ describe("remote browser service", () => {
       });
 
       expect(browserConfigs[0]).toMatchObject({
-        desiredModel: "Thinking",
+        desiredModel: "GPT-5.5 Thinking",
         modelStrategy: "select",
         createImageMode: true,
         captureGeneratedImages: true,
