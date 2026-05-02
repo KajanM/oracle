@@ -614,6 +614,11 @@ async function selectModelViaTrustedClicks(
       modelPickerInstrumentation?: { reopenTriggerClicks: number };
     }
   | {
+      status: "switched-best-effort";
+      label?: string | null;
+      modelPickerInstrumentation?: { reopenTriggerClicks: number };
+    }
+  | {
       status: "option-not-found";
       hint?: { temporaryChat?: boolean; availableOptions?: string[] };
       modelPickerInstrumentation?: { reopenTriggerClicks: number };
@@ -762,8 +767,8 @@ async function selectModelViaTrustedClicks(
         await new Promise((r) => setTimeout(r, 50));
       }
       return {
-        status: "option-not-found",
-        hint: { availableOptions: lastAvailable },
+        status: "switched-best-effort",
+        label: match.label,
         modelPickerInstrumentation: { reopenTriggerClicks: 0 },
       };
     }
