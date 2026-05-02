@@ -101,7 +101,9 @@ export const INJECTED_ORACLE_DOM_HELPERS = String.raw`(() => {
       return document.querySelector('form') || document.body;
     }
     if (surface === 'modelPicker') {
-      const trigger = document.querySelector('[data-testid="model-switcher-dropdown-button"]');
+      const trigger =
+        document.querySelector('[data-testid="model-switcher-dropdown-button"]') ||
+        document.querySelector('button.__composer-pill[aria-haspopup="menu"]');
       return safeClosest(trigger, 'header, div, form, nav') || document.body;
     }
     if (surface === 'assistant') {
@@ -309,6 +311,9 @@ export const INJECTED_ORACLE_DOM_HELPERS = String.raw`(() => {
         continue;
       }
       if (label.toLowerCase().includes('gpt') || label.toLowerCase().includes('model')) {
+        return button;
+      }
+      if (button.classList.contains('__composer-pill') && /latest|instant|thinking|pro|extended/i.test(label)) {
         return button;
       }
     }
