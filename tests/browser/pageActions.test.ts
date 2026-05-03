@@ -467,7 +467,7 @@ describe("uploadAttachmentFile", () => {
     expect(logger).toHaveBeenCalledWith(expect.stringMatching(/already queued/i));
   });
 
-  test("skips upload when file count already satisfies expected count", async () => {
+  test("does not skip upload from file count without expected filename evidence", async () => {
     logger.mockClear();
     const dom = {
       getDocument: vi.fn(),
@@ -503,14 +503,14 @@ describe("uploadAttachmentFile", () => {
         logger,
         { expectedCount: 1 },
       ),
-    ).resolves.toBe(true);
+    ).rejects.toThrow(/Unable to locate ChatGPT file attachment input/i);
 
-    expect(dom.getDocument).not.toHaveBeenCalled();
+    expect(dom.getDocument).toHaveBeenCalled();
     expect(dom.setFileInputFiles).not.toHaveBeenCalled();
-    expect(logger).toHaveBeenCalledWith(expect.stringMatching(/composer shows 1 file/i));
+    expect(logger).not.toHaveBeenCalledWith(expect.stringMatching(/composer shows 1 file/i));
   });
 
-  test("skips upload when input count already satisfies expected count", async () => {
+  test("does not skip upload from input count without expected filename evidence", async () => {
     logger.mockClear();
     const dom = {
       getDocument: vi.fn(),
@@ -546,11 +546,11 @@ describe("uploadAttachmentFile", () => {
         logger,
         { expectedCount: 1 },
       ),
-    ).resolves.toBe(true);
+    ).rejects.toThrow(/Unable to locate ChatGPT file attachment input/i);
 
-    expect(dom.getDocument).not.toHaveBeenCalled();
+    expect(dom.getDocument).toHaveBeenCalled();
     expect(dom.setFileInputFiles).not.toHaveBeenCalled();
-    expect(logger).toHaveBeenCalledWith(expect.stringMatching(/composer shows 1 file/i));
+    expect(logger).not.toHaveBeenCalledWith(expect.stringMatching(/composer shows 1 file/i));
   });
 
   test("avoids retrying other inputs once upload shows progress", async () => {

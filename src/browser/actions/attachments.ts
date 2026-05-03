@@ -111,11 +111,9 @@ export async function uploadAttachmentFile(
           return false;
         };
         const names = [...signals.names, ...signals.matchingNames];
+        const hasExpectedName = names.some((value) => matchesExpected(value));
         return {
-          ui:
-            signals.ready &&
-            (signals.removeButtons > 0 ||
-              names.some((value) => matchesExpected(value))),
+          ui: signals.ready && hasExpectedName,
           input: signals.matchingNames.some((value) => matchesExpected(value)),
           inputCount: signals.matchingNames.length,
           chipCount: signals.names.length,
@@ -540,26 +538,13 @@ export async function uploadAttachmentFile(
     fileCount?: number;
     chipCount?: number;
     ui?: boolean;
+    input?: boolean;
   }): boolean => {
     if (expectedCount <= 0) return false;
-    const fileCount = typeof signals.fileCount === "number" ? signals.fileCount : 0;
     const chipCount = typeof signals.chipCount === "number" ? signals.chipCount : 0;
-    if (fileCount >= expectedCount) return true;
-    return Boolean(signals.ui && chipCount >= expectedCount);
+    return Boolean((signals.ui || signals.input) && chipCount >= expectedCount);
   };
-  const initialInputSatisfied =
-    expectedCount > 0 ? initialSignals.inputCount >= expectedCount : Boolean(initialSignals.input);
-  if (
-    expectedCount > 0 &&
-    (initialSignals.fileCount >= expectedCount || initialSignals.inputCount >= expectedCount)
-  ) {
-    const satisfiedCount = Math.max(initialSignals.fileCount, initialSignals.inputCount);
-    logger(
-      `Attachment already present: composer shows ${satisfiedCount} file${satisfiedCount === 1 ? "" : "s"}`,
-    );
-    return true;
-  }
-  if (initialInputSatisfied || initialSignals.input) {
+  if (initialSignals.input) {
     logger(`Attachment already queued in file input: ${path.basename(attachment.path)}`);
     return true;
   }
@@ -1066,17 +1051,11 @@ export async function uploadAttachmentFile(
     for (let orderIndex = 0; orderIndex < candidateOrder.length; orderIndex += 1) {
       const idx = candidateOrder[orderIndex];
       const queuedSignals = await readAttachmentSignals(expectedName);
-      if (
-        queuedSignals.ui ||
-        isExpectedSatisfied(queuedSignals) ||
-        hasChipDelta(queuedSignals) ||
-        hasUploadDelta(queuedSignals) ||
-        hasFileCountDelta(queuedSignals)
-      ) {
+      if (queuedSignals.ui || isExpectedSatisfied(queuedSignals)) {
         confirmedAttachment = true;
         break;
       }
-      if (queuedSignals.input || hasInputDelta(queuedSignals)) {
+      if (queuedSignals.input) {
         inputConfirmed = true;
         break;
       }
