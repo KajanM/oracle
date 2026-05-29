@@ -345,6 +345,7 @@ function buildChromeFlags(headless: boolean, debugBindAddress?: string | null): 
   }
 
   if (process.platform !== "win32" && !isWsl()) {
+    // Removed for Gemini: --use-mock-keychain prevents decryption of profile-stored cookies
     flags.push("--password-store=basic", "--use-mock-keychain");
   }
 

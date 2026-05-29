@@ -2,7 +2,11 @@ import chalk from "chalk";
 import type { RunOracleOptions } from "../oracle.js";
 import { formatTokenCount } from "../oracle/runUtils.js";
 import { formatFinishLine } from "../oracle/finishLine.js";
-import type { BrowserSessionConfig, BrowserRuntimeMetadata } from "../sessionStore.js";
+import type {
+  BrowserRemoteRunMetadata,
+  BrowserSessionConfig,
+  BrowserRuntimeMetadata,
+} from "../sessionStore.js";
 import { runBrowserMode } from "../browserMode.js";
 import type { BrowserRunResult } from "../browserMode.js";
 import type { BrowserGeneratedImage } from "./types.js";
@@ -20,6 +24,8 @@ export interface BrowserExecutionResult {
   elapsedMs: number;
   runtime: BrowserRuntimeMetadata;
   answerText: string;
+  answerMarkdown?: string;
+  answerHtml?: string;
   generatedImages?: BrowserGeneratedImage[];
 }
 
@@ -34,6 +40,20 @@ export interface BrowserSessionRunnerDeps {
   assemblePrompt?: typeof assembleBrowserPrompt;
   executeBrowser?: typeof runBrowserMode;
   persistRuntimeHint?: (runtime: BrowserRuntimeMetadata) => Promise<void> | void;
+  persistRemoteHint?: (remote: BrowserRemoteRunMetadata) => Promise<void> | void;
+}
+
+function extractConversationId(tabUrl?: string): string | undefined {
+  if (!tabUrl) return undefined;
+  const marker = "/c/";
+  const start = tabUrl.indexOf(marker);
+  if (start < 0) return undefined;
+  const rest = tabUrl.slice(start + marker.length);
+  const end = ["/", "?", "#"]
+    .map((separator) => rest.indexOf(separator))
+    .filter((index) => index >= 0)
+    .sort((a, b) => a - b)[0];
+  return rest.slice(0, end ?? rest.length) || undefined;
 }
 
 export async function runBrowserSessionExecution(
@@ -95,6 +115,7 @@ export async function runBrowserSessionExecution(
     log(chalk.dim("Chrome automation does not stream output; this may take a minute..."));
   }
   const persistRuntimeHint = deps.persistRuntimeHint ?? (() => {});
+  const persistRemoteHint = deps.persistRemoteHint ?? (() => {});
   let browserResult: BrowserRunResult;
   try {
     browserResult = await executeBrowser({
@@ -116,6 +137,7 @@ export async function runBrowserSessionExecution(
           controllerPid: runtime.controllerPid ?? process.pid,
         });
       },
+      remoteHintCb: persistRemoteHint,
     });
   } catch (error) {
     if (error instanceof BrowserAutomationError) {
@@ -169,9 +191,14 @@ export async function runBrowserSessionExecution(
       chromePort: browserResult.chromePort,
       chromeHost: browserResult.chromeHost,
       userDataDir: browserResult.userDataDir,
+      chromeTargetId: browserResult.chromeTargetId,
+      tabUrl: browserResult.tabUrl,
+      conversationId: extractConversationId(browserResult.tabUrl),
       controllerPid: browserResult.controllerPid ?? process.pid,
     },
     answerText,
+    answerMarkdown: browserResult.answerMarkdown || browserResult.answerText || "",
+    answerHtml: browserResult.answerHtml,
     generatedImages: browserResult.generatedImages,
   };
 }

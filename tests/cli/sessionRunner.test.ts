@@ -118,6 +118,12 @@ beforeEach(() => {
   });
   sessionStoreMock.readModelLog.mockResolvedValue("model log body");
   sessionStoreMock.sessionsDir.mockReturnValue("/tmp/.oracle/sessions");
+  sessionStoreMock.getPaths.mockResolvedValue({
+    dir: "/tmp/.oracle/sessions/sess-1",
+    metadata: "/tmp/.oracle/sessions/sess-1/meta.json",
+    log: "/tmp/.oracle/sessions/sess-1/output.log",
+    request: "/tmp/.oracle/sessions/sess-1/request.json",
+  });
   vi.spyOn(fsPromises, "mkdir").mockResolvedValue(undefined);
   vi.spyOn(fsPromises, "writeFile").mockResolvedValue(undefined);
 });
@@ -889,6 +895,51 @@ describe("performSessionRun", () => {
     const result = deriveModelOutputPath("/tmp/out", "gpt-5.2-pro");
     const expected = path.join(path.dirname("/tmp/out"), "out.gpt-5.2-pro");
     expect(result).toBe(expected);
+  });
+
+  test("keeps remote browser sessions running after local transport loss", async () => {
+    vi.mocked(runBrowserSessionExecution).mockImplementationOnce(async (_args, deps) => {
+      await deps.persistRemoteHint?.({
+        host: "127.0.0.1:9473",
+        runId: "remote-run-1",
+        cursor: 0,
+        status: "running",
+        retentionMs: 3_600_000,
+      });
+      throw new Error("Remote browser run remote-run-1 failed: socket hang up");
+    });
+
+    await expect(
+      performSessionRun({
+        sessionMeta: baseSessionMeta,
+        runOptions: baseRunOptions,
+        mode: "browser",
+        browserConfig: { chromePath: null },
+        cwd: "/tmp",
+        log,
+        write,
+        version: cliVersion,
+      }),
+    ).resolves.toBeUndefined();
+
+    const finalUpdate = sessionStoreMock.updateSession.mock.calls.at(-1)?.[1];
+    expect(finalUpdate).toMatchObject({
+      status: "running",
+      response: { status: "running", incompleteReason: "remote-stream-disconnected" },
+      browser: {
+        remote: {
+          host: "127.0.0.1:9473",
+          runId: "remote-run-1",
+          status: "running",
+        },
+      },
+    });
+    expect(JSON.stringify(finalUpdate)).not.toContain("remoteToken");
+    expect(sessionStoreMock.updateModelRun).toHaveBeenCalledWith(
+      baseSessionMeta.id,
+      "gpt-5.2-pro",
+      expect.objectContaining({ status: "running" }),
+    );
   });
 
   test("records metadata when browser automation fails", async () => {

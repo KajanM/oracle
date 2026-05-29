@@ -6,6 +6,8 @@ import type {
   SessionMode,
   BrowserSessionConfig,
   BrowserRuntimeMetadata,
+  BrowserRemoteRunMetadata,
+  BrowserAnswerArtifacts,
 } from "../sessionStore.js";
 import type { RunOracleOptions, UsageSummary } from "../oracle.js";
 import {
@@ -90,6 +92,8 @@ export async function performSessionRun({
   const notificationSettings =
     notifications ?? deriveNotificationSettingsFromMetadata(sessionMeta, process.env);
   const modelForStatus = runOptions.model ?? sessionMeta.model;
+  let latestRuntime: BrowserRuntimeMetadata | undefined = sessionMeta.browser?.runtime;
+  let latestRemote = sessionMeta.browser?.remote;
   try {
     if (mode === "browser") {
       if (!browserConfig) {
@@ -104,9 +108,17 @@ export async function performSessionRun({
       const runnerDeps = {
         ...browserDeps,
         persistRuntimeHint: async (runtime: BrowserRuntimeMetadata) => {
+          latestRuntime = runtime;
           await sessionStore.updateSession(sessionMeta.id, {
             status: "running",
-            browser: { config: browserConfig, runtime },
+            browser: { config: browserConfig, runtime: latestRuntime, remote: latestRemote },
+          });
+        },
+        persistRemoteHint: async (remote: BrowserRemoteRunMetadata) => {
+          latestRemote = { ...latestRemote, ...remote };
+          await sessionStore.updateSession(sessionMeta.id, {
+            status: "running",
+            browser: { config: browserConfig, runtime: latestRuntime, remote: latestRemote },
           });
         },
       };
@@ -121,6 +133,11 @@ export async function performSessionRun({
           usage: result.usage,
         });
       }
+      const answerArtifacts = await persistBrowserAnswerArtifacts(sessionMeta.id, {
+        text: result.answerText ?? "",
+        markdown: result.answerMarkdown ?? result.answerText ?? "",
+        html: result.answerHtml,
+      });
       await sessionStore.updateSession(sessionMeta.id, {
         status: "completed",
         completedAt: new Date().toISOString(),
@@ -129,6 +146,10 @@ export async function performSessionRun({
         browser: {
           config: browserConfig,
           runtime: result.runtime,
+          remote: latestRemote?.status === "running"
+            ? { ...latestRemote, status: "completed", completedAt: new Date().toISOString() }
+            : latestRemote,
+          answerArtifacts,
         },
         response: undefined,
         transport: undefined,
@@ -444,6 +465,37 @@ export async function performSessionRun({
     const cloudflareChallenge =
       userError?.category === "browser-automation" &&
       (userError.details as { stage?: string } | undefined)?.stage === "cloudflare-challenge";
+    const remoteTransportLost =
+      mode === "browser" &&
+      latestRemote?.runId &&
+      !userError &&
+      !(error instanceof OracleResponseError) &&
+      !(error instanceof OracleTransportError);
+    if (remoteTransportLost) {
+      log(
+        dim(
+          `Remote browser stream disconnected after runId=${latestRemote?.runId}; keeping session running for remote replay.`,
+        ),
+      );
+      if (modelForStatus) {
+        await sessionStore.updateModelRun(sessionMeta.id, modelForStatus, {
+          status: "running",
+          completedAt: undefined,
+        });
+      }
+      await sessionStore.updateSession(sessionMeta.id, {
+        status: "running",
+        errorMessage: message,
+        mode,
+        browser: {
+          config: browserConfig,
+          runtime: latestRuntime ?? sessionMeta.browser?.runtime,
+          remote: latestRemote,
+        },
+        response: { status: "running", incompleteReason: "remote-stream-disconnected" },
+      });
+      return;
+    }
     if (connectionLost && mode === "browser") {
       const runtime = (userError.details as { runtime?: BrowserRuntimeMetadata } | undefined)
         ?.runtime;
@@ -460,7 +512,8 @@ export async function performSessionRun({
         mode,
         browser: {
           config: browserConfig,
-          runtime: runtime ?? sessionMeta.browser?.runtime,
+          runtime: runtime ?? latestRuntime ?? sessionMeta.browser?.runtime,
+          remote: latestRemote,
         },
         response: { status: "running", incompleteReason: "chrome-disconnected" },
       });
@@ -482,7 +535,8 @@ export async function performSessionRun({
         mode,
         browser: {
           config: browserConfig,
-          runtime: runtime ?? sessionMeta.browser?.runtime,
+          runtime: runtime ?? latestRuntime ?? sessionMeta.browser?.runtime,
+          remote: latestRemote,
         },
         response: { status: "running", incompleteReason: "assistant-timeout" },
       });
@@ -540,7 +594,8 @@ export async function performSessionRun({
       browser: browserConfig
         ? {
             config: browserConfig,
-            runtime: browserRuntime ?? undefined,
+            runtime: browserRuntime ?? latestRuntime ?? undefined,
+            remote: latestRemote,
           }
         : undefined,
       response: responseMetadata,
@@ -561,6 +616,32 @@ export async function performSessionRun({
     }
     throw error;
   }
+}
+
+async function persistBrowserAnswerArtifacts(
+  sessionId: string,
+  answer: { text: string; markdown: string; html?: string },
+): Promise<BrowserAnswerArtifacts> {
+  const paths = await sessionStore.getPaths(sessionId);
+  const artifacts: BrowserAnswerArtifacts = {};
+  const markdown = answer.markdown || answer.text || "";
+  const text = answer.text || markdown;
+  if (markdown.trim().length > 0) {
+    const rawMarkdownPath = path.join(paths.dir, "answer.raw.md");
+    await fs.writeFile(rawMarkdownPath, markdown.endsWith("\n") ? markdown : `${markdown}\n`, "utf8");
+    artifacts.rawMarkdownPath = rawMarkdownPath;
+  }
+  if (answer.html && answer.html.trim().length > 0) {
+    const htmlPath = path.join(paths.dir, "answer.html");
+    await fs.writeFile(htmlPath, answer.html, "utf8");
+    artifacts.htmlPath = htmlPath;
+  }
+  if (text.trim().length > 0 && text !== markdown) {
+    const textPath = path.join(paths.dir, "answer.txt");
+    await fs.writeFile(textPath, text.endsWith("\n") ? text : `${text}\n`, "utf8");
+    artifacts.textPath = textPath;
+  }
+  return artifacts;
 }
 
 type SessionLogWriter = ReturnType<typeof sessionStore.createLogWriter>;

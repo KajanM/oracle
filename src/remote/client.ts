@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import type { BrowserRunOptions } from "../browserMode.js";
 import type { BrowserRunResult } from "../browserMode.js";
 import type { BrowserAttachment } from "../browser/types.js";
+import type { BrowserRemoteRunMetadata } from "../sessionStore.js";
 import type { RemoteRunPayload, RemoteRunEvent, RemoteAttachmentPayload } from "./types.js";
 import { parseHostPort } from "../bridge/connection.js";
 
@@ -113,6 +114,8 @@ interface StreamState {
   cursor: number;
   resolved: BrowserRunResult | null;
   remoteError: string | null;
+  retentionMs?: number;
+  startedAt?: string;
 }
 
 export function createRemoteBrowserExecutor({ host, token }: RemoteExecutorOptions) {
@@ -338,7 +341,7 @@ function streamRun(args: StreamArgs): Promise<void> {
             buffer = buffer.slice(newlineIndex + 1);
             if (line.length > 0) {
               try {
-                handleEvent(line, options, state);
+                handleEvent(line, options, state, `${hostname}:${port}`);
                 if (state.resolved || state.remoteError) {
                   finish();
                   return;
@@ -390,7 +393,7 @@ function streamRun(args: StreamArgs): Promise<void> {
   });
 }
 
-function handleEvent(line: string, options: BrowserRunOptions, state: StreamState) {
+function handleEvent(line: string, options: BrowserRunOptions, state: StreamState, host?: string) {
   let event: RemoteRunEvent;
   try {
     event = JSON.parse(line) as RemoteRunEvent;
@@ -411,6 +414,9 @@ function handleEvent(line: string, options: BrowserRunOptions, state: StreamStat
   }
   if (event.type === "runId") {
     state.runId = event.runId;
+    state.retentionMs = event.retentionMs;
+    state.startedAt = event.startedAt;
+    emitRemoteHint(options, state, host, { status: "running" });
     return;
   }
   if (event.type === "log") {
@@ -419,11 +425,118 @@ function handleEvent(line: string, options: BrowserRunOptions, state: StreamStat
   }
   if (event.type === "error") {
     state.remoteError = event.message;
+    emitRemoteHint(options, state, host, {
+      status: "errored",
+      completedAt: new Date().toISOString(),
+      unavailableReason: event.message,
+    });
     return;
   }
   if (event.type === "result") {
     state.resolved = event.result;
+    emitRemoteHint(options, state, host, {
+      status: "completed",
+      completedAt: new Date().toISOString(),
+      conversationUrl: event.result.tabUrl,
+    });
   }
+}
+
+function emitRemoteHint(
+  options: BrowserRunOptions,
+  state: StreamState,
+  host: string | undefined,
+  updates: Partial<BrowserRemoteRunMetadata>,
+): void {
+  if (!options.remoteHintCb || !host || !state.runId) return;
+  void options.remoteHintCb({
+    host,
+    runId: state.runId,
+    cursor: state.cursor,
+    retentionMs: state.retentionMs,
+    startedAt: state.startedAt,
+    updatedAt: new Date().toISOString(),
+    ...updates,
+  });
+}
+
+export type RemoteBrowserRecoveryResult =
+  | { status: "completed"; result: BrowserRunResult; remote: BrowserRemoteRunMetadata }
+  | { status: "errored"; message: string; remote: BrowserRemoteRunMetadata }
+  | { status: "running"; remote: BrowserRemoteRunMetadata }
+  | { status: "unavailable"; message: string; remote: BrowserRemoteRunMetadata };
+
+export async function recoverRemoteBrowserRun({
+  host,
+  token,
+  runId,
+  cursor = -1,
+}: {
+  host: string;
+  token?: string;
+  runId: string;
+  cursor?: number;
+}): Promise<RemoteBrowserRecoveryResult> {
+  const { hostname, port } = parseHost(host);
+  const state: StreamState = { runId, cursor, resolved: null, remoteError: null };
+  try {
+    await streamRun({
+      mode: "resume",
+      hostname,
+      port,
+      token,
+      options: { prompt: "" },
+      state,
+      idleTimeoutMs: MIN_SOCKET_IDLE_TIMEOUT_MS,
+    });
+  } catch (error) {
+    const message = formatRemoteErrorMessage(error);
+    return {
+      status: "unavailable",
+      message,
+      remote: {
+        host,
+        runId,
+        cursor: state.cursor,
+        status: "unavailable",
+        updatedAt: new Date().toISOString(),
+        unavailableReason: message,
+      },
+    };
+  }
+  const baseRemote: BrowserRemoteRunMetadata = {
+    host,
+    runId,
+    cursor: state.cursor,
+    retentionMs: state.retentionMs,
+    startedAt: state.startedAt,
+    updatedAt: new Date().toISOString(),
+  };
+  if (state.resolved) {
+    return {
+      status: "completed",
+      result: state.resolved,
+      remote: {
+        ...baseRemote,
+        status: "completed",
+        completedAt: new Date().toISOString(),
+        conversationUrl: state.resolved.tabUrl,
+      },
+    };
+  }
+  if (state.remoteError) {
+    return {
+      status: "errored",
+      message: state.remoteError,
+      remote: {
+        ...baseRemote,
+        status: "errored",
+        completedAt: new Date().toISOString(),
+        unavailableReason: state.remoteError,
+      },
+    };
+  }
+  return { status: "running", remote: { ...baseRemote, status: "running" } };
 }
 
 async function serializeAttachments(

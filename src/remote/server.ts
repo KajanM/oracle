@@ -9,6 +9,7 @@ import chalk from "chalk";
 import type { BrowserAttachment, BrowserLogger, CookieParam } from "../browser/types.js";
 import { runBrowserMode } from "../browserMode.js";
 import type { BrowserRunResult } from "../browserMode.js";
+import { createGeminiWebExecutor } from "../gemini-web/index.js";
 import type {
   RemoteRunPayload,
   RemoteRunEvent,
@@ -40,7 +41,7 @@ interface RemoteServerInstance {
   close(): Promise<void>;
 }
 
-const DEFAULT_COMPLETED_RUN_RETENTION_MS = 10 * 60_000;
+const DEFAULT_COMPLETED_RUN_RETENTION_MS = 60 * 60_000;
 const DEFAULT_RECENT_RUNS_LIMIT = 25;
 const TCP_KEEPALIVE_INITIAL_MS = 15_000;
 
@@ -81,7 +82,9 @@ export async function createRemoteServer(
     : (_formatter: (msg: string) => string, msg: string) => msg;
 
   const completedRetentionMs =
-    options.completedRunRetentionMs ?? DEFAULT_COMPLETED_RUN_RETENTION_MS;
+    options.completedRunRetentionMs ??
+    parsePositiveIntegerEnv("ORACLE_SERVE_COMPLETED_RUN_RETENTION_MS") ??
+    DEFAULT_COMPLETED_RUN_RETENTION_MS;
   const recentRunsLimit = options.recentRunsLimit ?? DEFAULT_RECENT_RUNS_LIMIT;
 
   // Active runs by id, plus a small ring of completed runs (capped) for the
@@ -155,6 +158,7 @@ export async function createRemoteServer(
           maxConcurrentRuns,
           activeRunIds: Array.from(activeRunIds),
           retainedRuns: runs.size,
+          retentionMs: completedRetentionMs,
         }),
       );
       return;
@@ -340,7 +344,7 @@ export async function createRemoteServer(
     });
 
     // Emit the runId event first so resuming clients have something to address.
-    emitEvent(record, { type: "runId", seq: 0, runId }, logger);
+    emitEvent(record, { type: "runId", seq: 0, runId, retentionMs: completedRetentionMs, startedAt: new Date(record.startedAt).toISOString() }, logger);
 
     record.completion = (async () => {
       const attachments: BrowserAttachment[] = [];
@@ -377,37 +381,91 @@ export async function createRemoteServer(
         }
 
         // Remote runs always rely on the host's own Chrome profile; ignore any inline cookie transfer.
+        // Also default to closing per-run Chrome instances on the remote host. A client-side
+        // keepBrowser preference is useful locally, but on a long-lived remote service it leaks
+        // visible Chrome windows unless the host explicitly opts in for debugging.
         const activePayload = payload!;
+        // Detect Gemini Deep Think early so we can preserve client-supplied cookies
+        // (the launchd-hosted serve cannot decrypt Chrome Safe Storage on its own).
+        const _earlyModel =
+          typeof activePayload.browserConfig?.desiredModel === "string"
+            ? activePayload.browserConfig.desiredModel
+            : "";
+        const _isGeminiEarly = _earlyModel
+          .toLowerCase()
+          .replace(/[_\s]+/g, "-")
+          .startsWith("gemini");
         if (activePayload.browserConfig) {
-          activePayload.browserConfig.inlineCookies = null;
-          activePayload.browserConfig.inlineCookiesSource = null;
+          if (!_isGeminiEarly) {
+            activePayload.browserConfig.inlineCookies = null;
+            activePayload.browserConfig.inlineCookiesSource = null;
+          }
           activePayload.browserConfig.cookieSync = true;
         } else {
           activePayload.browserConfig = {} as typeof activePayload.browserConfig;
         }
 
+        if (
+          activePayload.browserConfig.keepBrowser &&
+          process.env.ORACLE_SERVE_ALLOW_KEEP_BROWSER !== "1"
+        ) {
+          logger(
+            `[serve] Run ${runId} requested keepBrowser; forcing keepBrowser=false on remote host`,
+          );
+        }
+        activePayload.browserConfig.keepBrowser =
+          process.env.ORACLE_SERVE_ALLOW_KEEP_BROWSER === "1"
+            ? Boolean(activePayload.browserConfig.keepBrowser)
+            : false;
+
         payload!.browserConfig.manualLogin = false;
         payload!.browserConfig.manualLoginProfileDir = null;
         payload!.browserConfig.manualLoginCookieSync = false;
-        if (payload!.browserConfig.createImageMode) {
-          payload!.browserConfig.desiredModel = "Thinking";
-          payload!.browserConfig.modelStrategy = "select";
-          payload!.browserConfig.thinkingTime = undefined;
-          payload!.browserConfig.captureGeneratedImages = true;
-        } else {
-          payload!.browserConfig.desiredModel = "Use latest model";
-          payload!.browserConfig.modelStrategy = "select";
-          payload!.browserConfig.thinkingTime = "extended";
-        }
 
-        const result = await runBrowser({
-          prompt: payload!.prompt,
-          attachments,
-          config: payload!.browserConfig,
-          log: automationLogger,
-          heartbeatIntervalMs: payload!.options.heartbeatIntervalMs,
-          verbose: payload!.options.verbose,
-        });
+        const requestedModel =
+          typeof payload!.browserConfig.desiredModel === "string"
+            ? payload!.browserConfig.desiredModel
+            : "";
+        const requestedModelLc = requestedModel.toLowerCase().replace(/[_\s]+/g, "-");
+        const isGeminiRequest = requestedModelLc.startsWith("gemini");
+
+        let result: BrowserRunResult;
+        if (isGeminiRequest) {
+          logger(
+            `[serve] Run ${runId} routing to Gemini web executor (model=${requestedModel})`,
+          );
+          // Preserve the original desiredModel for the Gemini executor to resolve
+          payload!.browserConfig.modelStrategy = "select";
+          const geminiExecutor = createGeminiWebExecutor({});
+          result = await geminiExecutor({
+            prompt: payload!.prompt,
+            attachments,
+            config: payload!.browserConfig,
+            log: automationLogger,
+            heartbeatIntervalMs: payload!.options.heartbeatIntervalMs,
+            verbose: payload!.options.verbose,
+          });
+        } else {
+          if (payload!.browserConfig.createImageMode) {
+            payload!.browserConfig.desiredModel = "Thinking";
+            payload!.browserConfig.modelStrategy = "select";
+            payload!.browserConfig.thinkingTime = undefined;
+            payload!.browserConfig.captureGeneratedImages = true;
+          } else {
+            payload!.browserConfig.desiredModel = "Use latest model";
+            payload!.browserConfig.modelStrategy = "select";
+            payload!.browserConfig.thinkingTime = "extended";
+          }
+
+          result = await runBrowser({
+            prompt: payload!.prompt,
+            attachments,
+            config: payload!.browserConfig,
+            log: automationLogger,
+            heartbeatIntervalMs: payload!.options.heartbeatIntervalMs,
+            verbose: payload!.options.verbose,
+          });
+        }
 
         emitEvent(record, { type: "result", seq: 0, result: sanitizeResult(result) }, logger);
         retireRun(record, "completed", logger);
@@ -551,6 +609,13 @@ function attachClient(
   });
 }
 
+function parsePositiveIntegerEnv(name: string): number | undefined {
+  const raw = process.env[name];
+  if (!raw) return undefined;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
 function handleResume(args: {
   runId: string;
   cursor: number;
@@ -572,6 +637,9 @@ function handleResume(args: {
     res.end(
       JSON.stringify({
         error: `runId=${runId} no longer available (server retains completed runs ${completedRetentionMs}ms)`,
+        code: "remote-run-unavailable",
+        runId,
+        retentionMs: completedRetentionMs,
       }),
     );
     return;
@@ -738,6 +806,9 @@ function sanitizeResult(result: BrowserRunResult): BrowserRunResult {
     chromePid: undefined,
     chromePort: undefined,
     userDataDir: undefined,
+    chromeTargetId: result.chromeTargetId,
+    tabUrl: result.tabUrl,
+    controllerPid: undefined,
   };
 }
 

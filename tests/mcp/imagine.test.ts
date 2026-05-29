@@ -2,7 +2,7 @@ import { describe, expect, test } from "vitest";
 import { buildImagineBrowserConfig } from "../../src/mcp/tools/imagine.js";
 
 describe("buildImagineBrowserConfig", () => {
-  test("uses Thinking model and enables image capture without manual login", () => {
+  test("uses current ChatGPT model and enables image capture without manual login", () => {
     const config = buildImagineBrowserConfig({
       userConfig: {
         browser: {
@@ -21,7 +21,7 @@ describe("buildImagineBrowserConfig", () => {
       url: "https://chatgpt.com/g/g-p-foo/project",
       keepBrowser: true,
       desiredModel: "Thinking",
-      modelStrategy: "select",
+      modelStrategy: "current",
       createImageMode: true,
       captureGeneratedImages: true,
       manualLogin: false,

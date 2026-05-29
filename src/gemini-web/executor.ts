@@ -7,6 +7,7 @@ import type {
 } from "../browser/types.js";
 import { getCookies } from "@steipete/sweet-cookie";
 import { runProviderDomFlow } from "../browser/providerDomFlow.js";
+import { syncCookies } from "../browser/cookies.js";
 import { delay } from "../browser/utils.js";
 import { runGeminiWebWithFallback, saveFirstGeminiImageFromOutput } from "./client.js";
 import { geminiDeepThinkDomProvider } from "../browser/providers/index.js";
@@ -218,6 +219,42 @@ async function runGeminiDeepThinkViaBrowser(
     }
     await Runtime.enable();
     await Page.enable();
+    const Network = client.Network;
+    if (Network && typeof Network.enable === "function") {
+      await Network.enable({});
+      const inline = browserConfig?.inlineCookies ?? null;
+      if (inline && inline.length > 0) {
+        let applied = 0;
+        let failed = 0;
+        for (const c of inline) {
+          if (!c?.name) continue;
+          const cookieParam: Record<string, unknown> = {
+            name: c.name,
+            value: c.value ?? "",
+            path: c.path ?? "/",
+            secure: c.secure ?? true,
+            httpOnly: c.httpOnly ?? false,
+          };
+          if (typeof c.expires === "number") cookieParam.expires = c.expires;
+          if (c.sameSite === "Lax" || c.sameSite === "Strict" || c.sameSite === "None") {
+            cookieParam.sameSite = c.sameSite;
+          }
+          if (c.domain) cookieParam.domain = c.domain;
+          if (c.url) cookieParam.url = c.url;
+          if (!cookieParam.url && !cookieParam.domain) cookieParam.url = "https://gemini.google.com/";
+          try {
+            const res = await Network.setCookie(cookieParam as unknown as Parameters<NonNullable<typeof Network>["setCookie"]>[0]);
+            if (res?.success) applied += 1; else failed += 1;
+          } catch (err) {
+            failed += 1;
+            log?.(`[gemini-web] setCookie failed for ${c.name}: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+        log?.(`[gemini-web] Direct cookie inject: applied=${applied} failed=${failed} (of ${inline.length})`);
+      } else {
+        log?.("[gemini-web] No inline cookies provided; relying on profile cookies.");
+      }
+    }
 
     const evaluate = async <T>(expression: string): Promise<T | undefined> => {
       const { result } = await Runtime.evaluate({ expression, returnByValue: true });

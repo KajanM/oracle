@@ -16,9 +16,17 @@ export async function syncCookies(
     inlineCookies?: CookieParam[] | null;
     cookiePath?: string | null;
     waitMs?: number;
+    onError?: (message: string) => void;
   } = {},
 ) {
-  const { allowErrors = false, filterNames, inlineCookies, cookiePath, waitMs = 0 } = options;
+  const {
+    allowErrors = false,
+    filterNames,
+    inlineCookies,
+    cookiePath,
+    waitMs = 0,
+    onError,
+  } = options;
   try {
     // Learned: inline cookies are the most deterministic (avoid Keychain + profile ambiguity).
     const cookies = inlineCookies?.length
@@ -54,6 +62,7 @@ export async function syncCookies(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (allowErrors) {
+      onError?.(message);
       logger(`Cookie sync failed (continuing with override): ${message}`);
       return 0;
     }
@@ -121,6 +130,11 @@ async function readChromeCookies(
     console.log(`[cookies] sweet-cookie warnings:\n- ${warnings.join("\n- ")}`);
   }
 
+  const warningMessage = formatCookieReadWarning(warnings);
+  if (!cookies.length && warningMessage) {
+    throw new ChromeCookieSyncError(warningMessage);
+  }
+
   const merged = new Map<string, CookieParam>();
   for (const cookie of cookies) {
     const normalized = toCdpCookie(cookie);
@@ -130,6 +144,36 @@ async function readChromeCookies(
   }
 
   return Array.from(merged.values());
+}
+
+function formatCookieReadWarning(warnings: string[]): string | null {
+  const keychainWarning = warnings.find((warning) =>
+    /Failed to read macOS Keychain|Chrome Safe Storage|keychain locked|permission denied/i.test(
+      warning,
+    ),
+  );
+  if (keychainWarning) {
+    const context = process.env.SSH_CONNECTION
+      ? "The current SSH/non-GUI session cannot unlock the login keychain."
+      : "macOS may require approving a Keychain prompt from a GUI session.";
+    return [
+      "Chrome cookie sync could not read Chrome Safe Storage from macOS Keychain.",
+      sanitizeCookieWarning(keychainWarning),
+      context,
+      "Use remote Chrome, run Oracle from a local GUI terminal once, or provide inline cookies.",
+    ].join(" ");
+  }
+
+  const dbWarning = warnings.find((warning) =>
+    /Chrome cookies database not found|Failed to copy Chrome cookie DB|failed reading Chrome cookies/i.test(
+      warning,
+    ),
+  );
+  return dbWarning ? sanitizeCookieWarning(dbWarning) : null;
+}
+
+function sanitizeCookieWarning(warning: string): string {
+  return warning.replace(/password:.*$/gim, "password:<redacted>").trim();
 }
 
 function normalizeInlineCookies(rawCookies: CookieParam[], fallbackHost: string): CookieParam[] {

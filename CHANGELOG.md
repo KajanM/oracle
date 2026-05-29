@@ -17,6 +17,8 @@
 - Browser: after model select, `closeOpenModelMenuBestEffort` re-clicks the Pro row by label/testid, then uses **CDP** outside-clicks (beside the menu + composer) and Escape until the dropdown closes.
 - Browser: **root cause fix** — never use the first `[role="menu"]` in the document (often not the model picker). Resolve the menu that contains `model-switcher-*` and sits under the trigger; use that for Pro clicks, Escape, and CDP outside-clicks. Logs: `[browser] [model] diagnostic` with `pickedHasSwitcher` / `menus[]`.
 
+- Browser: honor configured `maxFileSizeBytes` / `ORACLE_MAX_FILE_SIZE_BYTES` when preparing text files and bundles for browser uploads, so MCP/browser runs can use raised limits such as 10 MB instead of falling back to 1 MB.
+
 ## 0.9.0 — 2026-03-08
 
 ### Changed

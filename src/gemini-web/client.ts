@@ -248,16 +248,22 @@ export function parseGeminiStreamGenerateResponse(rawText: string): {
   const parts = Array.isArray(responseJson) ? responseJson : [];
   let bodyIndex = 0;
   let body: unknown = null;
+  // Streaming responses include multiple "wrb.fr" frames where the final frame holds
+  // the complete answer. Walk through all frames and keep the LAST valid one with
+  // the longest text payload.
+  let bestTextLen = -1;
   for (let i = 0; i < parts.length; i += 1) {
     const partBody = getNestedValue<string | null>(parts[i], [2], null);
     if (!partBody) continue;
     try {
       const parsed = JSON.parse(partBody) as unknown;
       const candidateList = getNestedValue<unknown[]>(parsed, [4], []);
-      if (Array.isArray(candidateList) && candidateList.length > 0) {
+      if (!Array.isArray(candidateList) || candidateList.length === 0) continue;
+      const candText = getNestedValue<string>(candidateList[0], [1, 0], "") ?? "";
+      if (candText.length >= bestTextLen) {
+        bestTextLen = candText.length;
         bodyIndex = i;
         body = parsed;
-        break;
       }
     } catch {
       // ignore

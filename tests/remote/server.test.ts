@@ -67,7 +67,7 @@ describe("remote browser service", () => {
       const result = await executor({
         prompt: "remote",
         attachments: [{ path: attachmentPath, displayPath: "note.txt", sizeBytes: 11 }],
-        config: {},
+        config: { keepBrowser: true },
         log: (message?: string) => {
           if (message) clientLogs.push(message);
         },
@@ -80,6 +80,7 @@ describe("remote browser service", () => {
         desiredModel: "Use latest model",
         modelStrategy: "select",
         thinkingTime: "extended",
+        keepBrowser: false,
         manualLogin: false,
         manualLoginProfileDir: null,
         manualLoginCookieSync: false,
@@ -101,6 +102,7 @@ describe("remote browser service", () => {
       expect(healthOk.statusCode).toBe(200);
       expect(healthOk.json?.ok).toBe(true);
       expect(typeof healthOk.json?.version).toBe("string");
+      expect(healthOk.json?.retentionMs).toBe(60 * 60_000);
 
       await server.close();
       await rm(tmpDir, { recursive: true, force: true });
@@ -208,6 +210,87 @@ describe("remote browser service", () => {
       process.env.ORACLE_SERVE_MAX_CONCURRENT = previousCap;
     }
   });
+
+  test.skipIf(!CAN_LISTEN_LOCALHOST)(
+    "uses ORACLE_SERVE_COMPLETED_RUN_RETENTION_MS for resumable completed buffers",
+    async () => {
+      const previousRetention = process.env.ORACLE_SERVE_COMPLETED_RUN_RETENTION_MS;
+      process.env.ORACLE_SERVE_COMPLETED_RUN_RETENTION_MS = "7200000";
+
+      const server = await createRemoteServer({
+        host: "127.0.0.1",
+        port: 0,
+        token: "secret",
+        logger: () => {},
+      });
+
+      const health = await httpGetJson({
+        hostname: "127.0.0.1",
+        port: server.port,
+        path: "/health",
+        token: "secret",
+      });
+      expect(health.statusCode).toBe(200);
+      expect(health.json?.retentionMs).toBe(7_200_000);
+
+      await server.close();
+      if (previousRetention === undefined) {
+        delete process.env.ORACLE_SERVE_COMPLETED_RUN_RETENTION_MS;
+      } else {
+        process.env.ORACLE_SERVE_COMPLETED_RUN_RETENTION_MS = previousRetention;
+      }
+    },
+  );
+
+
+  test.skipIf(!CAN_LISTEN_LOCALHOST)(
+    "emits remote run hints without persisting the access token",
+    async () => {
+      const server = await createRemoteServer(
+        { host: "127.0.0.1", port: 0, token: "secret", logger: () => {} },
+        {
+          runBrowser: async () => ({
+            answerText: "done",
+            answerMarkdown: "**done**",
+            answerHtml: "<strong>done</strong>",
+            tookMs: 1000,
+            answerTokens: 1,
+            answerChars: 4,
+            tabUrl: "https://chatgpt.com/c/abc",
+          }),
+        },
+      );
+      const executor = createRemoteBrowserExecutor({
+        host: `127.0.0.1:${server.port}`,
+        token: "secret",
+      });
+      const hints: unknown[] = [];
+
+      const result = await executor({
+        prompt: "remote",
+        attachments: [],
+        remoteHintCb: (hint) => {
+          hints.push(hint);
+        },
+      });
+
+      expect(result.answerMarkdown).toBe("**done**");
+      expect(hints.length).toBeGreaterThanOrEqual(2);
+      expect(hints[0]).toMatchObject({
+        host: `127.0.0.1:${server.port}`,
+        status: "running",
+      });
+      expect(hints.at(-1)).toMatchObject({
+        status: "completed",
+        conversationUrl: "https://chatgpt.com/c/abc",
+      });
+      expect(JSON.stringify(hints)).not.toContain("secret");
+
+      await server.close();
+    },
+  );
+
+
 });
 
 async function waitForActiveRun(port: number): Promise<void> {

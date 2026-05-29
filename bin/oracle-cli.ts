@@ -704,12 +704,18 @@ program
   .option("--host <address>", "Interface to bind (default 0.0.0.0).")
   .option("--port <number>", "Port to listen on (default random).", parseIntOption)
   .option("--token <value>", "Access token clients must provide (random if omitted).")
+  .option(
+    "--completed-run-retention-ms <number>",
+    "How long completed run buffers stay resumable (default 3600000).",
+    parseIntOption,
+  )
   .action(async (commandOptions) => {
     const { serveRemote } = await import("../src/remote/server.js");
     await serveRemote({
       host: commandOptions.host,
       port: commandOptions.port,
       token: commandOptions.token,
+      completedRunRetentionMs: commandOptions.completedRunRetentionMs,
     });
   });
 

@@ -58,6 +58,22 @@ describe("syncCookies", () => {
     ).rejects.toBeInstanceOf(ChromeCookieSyncError);
   });
 
+  test("surfaces macOS Keychain cookie read failures", async () => {
+    getCookies.mockResolvedValue({
+      cookies: [],
+      warnings: ["Failed to read macOS Keychain (Chrome Safe Storage): exit 36"],
+    });
+
+    await expect(
+      syncCookies(
+        { setCookie: vi.fn() } as unknown as ChromeClient["Network"],
+        "https://chatgpt.com",
+        null,
+        logger,
+      ),
+    ).rejects.toThrow("Chrome cookie sync could not read Chrome Safe Storage");
+  });
+
   test("can opt into continuing on cookie failures", async () => {
     getCookies.mockRejectedValue(new Error("boom"));
     const applied = await syncCookies(
@@ -70,6 +86,27 @@ describe("syncCookies", () => {
     expect(applied).toBe(0);
     expect(logger).toHaveBeenCalledWith(
       expect.stringContaining("Cookie sync failed (continuing with override)"),
+    );
+  });
+
+  test("reports cookie failures through allow-errors callback", async () => {
+    getCookies.mockResolvedValue({
+      cookies: [],
+      warnings: ["Failed to read macOS Keychain (Chrome Safe Storage): exit 36"],
+    });
+    const onError = vi.fn();
+
+    const applied = await syncCookies(
+      { setCookie: vi.fn() } as unknown as ChromeClient["Network"],
+      "https://chatgpt.com",
+      null,
+      logger,
+      { allowErrors: true, onError },
+    );
+
+    expect(applied).toBe(0);
+    expect(onError).toHaveBeenCalledWith(
+      expect.stringContaining("Chrome cookie sync could not read Chrome Safe Storage"),
     );
   });
 

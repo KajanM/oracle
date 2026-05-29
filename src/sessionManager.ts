@@ -75,9 +75,32 @@ export interface BrowserRuntimeMetadata {
   controllerPid?: number;
 }
 
+export type RemoteRunStatus = "running" | "completed" | "errored" | "unavailable";
+
+export interface BrowserRemoteRunMetadata {
+  host: string;
+  runId: string;
+  cursor?: number;
+  status?: RemoteRunStatus;
+  startedAt?: string;
+  updatedAt?: string;
+  completedAt?: string;
+  retentionMs?: number;
+  conversationUrl?: string;
+  unavailableReason?: string;
+}
+
+export interface BrowserAnswerArtifacts {
+  rawMarkdownPath?: string;
+  htmlPath?: string;
+  textPath?: string;
+}
+
 export interface BrowserMetadata {
   config?: BrowserSessionConfig;
   runtime?: BrowserRuntimeMetadata;
+  remote?: BrowserRemoteRunMetadata;
+  answerArtifacts?: BrowserAnswerArtifacts;
 }
 
 export interface SessionResponseMetadata {

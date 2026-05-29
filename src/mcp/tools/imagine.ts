@@ -61,7 +61,7 @@ export function buildImagineBrowserConfig({
     manualLoginProfileDir: null,
     manualLoginCookieSync: false,
     desiredModel: "Thinking",
-    modelStrategy: "select",
+    modelStrategy: "current",
     thinkingTime: undefined,
     createImageMode: true,
     captureGeneratedImages: true,

@@ -1,6 +1,6 @@
 import type CDP from "chrome-remote-interface";
 import type Protocol from "devtools-protocol";
-import type { BrowserRuntimeMetadata } from "../sessionStore.js";
+import type { BrowserRemoteRunMetadata, BrowserRuntimeMetadata } from "../sessionStore.js";
 import type { ThinkingTimeLevel } from "../oracle/types.js";
 
 export type ChromeClient = Awaited<ReturnType<typeof CDP>>;
@@ -89,6 +89,8 @@ export interface BrowserRunOptions {
   verbose?: boolean;
   /** Optional hook to persist runtime info (port/url/target) as soon as Chrome is ready. */
   runtimeHintCb?: (hint: BrowserRuntimeMetadata) => void | Promise<void>;
+  /** Optional hook to persist remote oracle serve run metadata without storing tokens. */
+  remoteHintCb?: (hint: BrowserRemoteRunMetadata) => void | Promise<void>;
 }
 
 export interface BrowserRunResult {

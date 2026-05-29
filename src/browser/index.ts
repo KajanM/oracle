@@ -302,6 +302,7 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
     }
 
     const cookieStartMs = Date.now();
+    let cookieSyncError: string | null = null;
     const manualLoginCookieSync = manualLogin && Boolean(config.manualLoginCookieSync);
     const cookieSyncEnabled = config.cookieSync && (!manualLogin || manualLoginCookieSync);
     if (cookieSyncEnabled) {
@@ -324,6 +325,9 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
         inlineCookies: config.inlineCookies ?? undefined,
         cookiePath: config.chromeCookiePath ?? undefined,
         waitMs: config.cookieSyncWaitMs ?? 0,
+        onError: (message) => {
+          cookieSyncError = message;
+        },
       });
       appliedCookies = cookieCount;
       if (config.inlineCookies && cookieCount === 0) {
@@ -349,19 +353,19 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
     if (cookieSyncEnabled && !manualLogin && (appliedCookies ?? 0) === 0 && !config.inlineCookies) {
       // Learned: if the profile has no ChatGPT cookies, browser mode will just bounce to login.
       // Fail early so the user knows to sign in.
-      throw new BrowserAutomationError(
-        "No ChatGPT cookies were applied from your Chrome profile; cannot proceed in browser mode. " +
+      const cookieSyncMessage = cookieSyncError
+        ? `${cookieSyncError} No ChatGPT cookies were applied from your Chrome profile; cannot proceed in browser mode.`
+        : "No ChatGPT cookies were applied from your Chrome profile; cannot proceed in browser mode. " +
           "Make sure ChatGPT is signed in in the selected profile, use inline cookies, " +
-          "or retry with --browser-cookie-wait 5s if Keychain prompts are slow.",
-        {
-          stage: "execute-browser",
-          details: {
-            profile: config.chromeProfile ?? "Default",
-            cookiePath: config.chromeCookiePath ?? null,
-            hint: "If macOS Keychain prompts or denies access, run oracle from a GUI session or use --copy/--render for the manual flow.",
-          },
+          "or retry with --browser-cookie-wait 5s if Keychain prompts are slow.";
+      throw new BrowserAutomationError(cookieSyncMessage, {
+        stage: "execute-browser",
+        details: {
+          profile: config.chromeProfile ?? "Default",
+          cookiePath: config.chromeCookiePath ?? null,
+          hint: "If macOS Keychain prompts or denies access, run oracle from a GUI session or use --copy/--render for the manual flow.",
         },
-      );
+      });
     }
 
     logger(
@@ -485,7 +489,9 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
     };
     await captureRuntimeSnapshot();
     const modelStartMs = Date.now();
-    const modelStrategy = config.modelStrategy ?? DEFAULT_MODEL_STRATEGY;
+    const modelStrategy = config.createImageMode
+      ? "current"
+      : (config.modelStrategy ?? DEFAULT_MODEL_STRATEGY);
     if (config.desiredModel && modelStrategy === "select") {
       await bringPageToFront();
       await raceWithDisconnect(
@@ -817,29 +823,26 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
       `[browser] [lifecycle] waiting for assistant response — timeout=${config.timeoutMs}ms baseline_turns=${baselineTurns ?? "none"}`,
     );
     try {
-      const assistantWait = waitForAssistantResponseWithReload(
-        Runtime,
-        Page,
-        config.timeoutMs,
-        logger,
-        baselineTurns ?? undefined,
-      );
-      const imageWait =
-        config.captureGeneratedImages && config.createImageMode
-          ? waitForNewGeneratedImage(
-              Runtime,
-              baselineGeneratedImageCount,
-              config.timeoutMs,
-              logger,
-            ).then(() => ({
-              text: "",
-              html: undefined,
-              meta: {},
-            }))
-          : null;
-      answer = await raceWithDisconnect(
-        imageWait ? Promise.race([assistantWait, imageWait]) : assistantWait,
-      );
+      if (config.captureGeneratedImages && config.createImageMode) {
+        await raceWithDisconnect(
+          waitForNewGeneratedImage(Runtime, baselineGeneratedImageCount, config.timeoutMs, logger),
+        );
+        answer = {
+          text: "",
+          html: undefined,
+          meta: {},
+        };
+      } else {
+        answer = await raceWithDisconnect(
+          waitForAssistantResponseWithReload(
+            Runtime,
+            Page,
+            config.timeoutMs,
+            logger,
+            baselineTurns ?? undefined,
+          ),
+        );
+      }
       const waitElapsed = Math.round((Date.now() - waitStartMs) / 1000);
       logger(
         `[browser] [lifecycle] assistant response captured after ${waitElapsed}s — ${answer.text.length} chars`,
@@ -922,152 +925,158 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
     }
     // Ensure we store the final conversation URL even if the UI updated late.
     await updateConversationHint("post-response", 15_000);
-    const baselineNormalized = baselineAssistantText
-      ? normalizeForComparison(baselineAssistantText)
-      : "";
-    if (baselineNormalized) {
-      const normalizedAnswer = normalizeForComparison(answer.text ?? "");
-      const baselinePrefix =
-        baselineNormalized.length >= 80
-          ? baselineNormalized.slice(0, Math.min(200, baselineNormalized.length))
-          : "";
-      const isBaseline =
-        normalizedAnswer === baselineNormalized ||
-        (baselinePrefix.length > 0 && normalizedAnswer.startsWith(baselinePrefix));
-      if (isBaseline) {
-        logger("Detected stale assistant response; waiting for new response...");
-        const refreshed = await waitForFreshAssistantResponse(baselineNormalized, 15_000);
-        if (refreshed) {
-          answer = refreshed;
-        }
-      }
-    }
     answerText = answer.text;
     answerHtml = answer.html ?? "";
-    const copiedMarkdown = await raceWithDisconnect(
-      withRetries(
-        async () => {
-          const attempt = await captureAssistantMarkdown(Runtime, answer.meta, logger);
-          if (!attempt) {
-            throw new Error("copy-missing");
+    if (config.captureGeneratedImages && config.createImageMode) {
+      answerMarkdown = answerText;
+    } else {
+      const baselineNormalized = baselineAssistantText
+        ? normalizeForComparison(baselineAssistantText)
+        : "";
+      if (baselineNormalized) {
+        const normalizedAnswer = normalizeForComparison(answer.text ?? "");
+        const baselinePrefix =
+          baselineNormalized.length >= 80
+            ? baselineNormalized.slice(0, Math.min(200, baselineNormalized.length))
+            : "";
+        const isBaseline =
+          normalizedAnswer === baselineNormalized ||
+          (baselinePrefix.length > 0 && normalizedAnswer.startsWith(baselinePrefix));
+        if (isBaseline) {
+          logger("Detected stale assistant response; waiting for new response...");
+          const refreshed = await waitForFreshAssistantResponse(baselineNormalized, 15_000);
+          if (refreshed) {
+            answer = refreshed;
           }
-          return attempt;
-        },
-        {
-          retries: 2,
-          delayMs: 350,
-          onRetry: (attempt, error) => {
-            if (options.verbose) {
-              logger(
-                `[retry] Markdown capture attempt ${attempt + 1}: ${error instanceof Error ? error.message : error}`,
-              );
-            }
-          },
-        },
-      ),
-    ).catch(() => null);
-    answerMarkdown = copiedMarkdown ?? answerText;
-
-    const promptEchoMatcher = buildPromptEchoMatcher(promptText);
-    ({ answerText, answerMarkdown } = await maybeRecoverLongAssistantResponse({
-      runtime: Runtime,
-      baselineTurns,
-      answerText,
-      answerMarkdown,
-      logger,
-      allowMarkdownUpdate: !copiedMarkdown,
-    }));
-
-    // Final sanity check: ensure we didn't accidentally capture the user prompt instead of the assistant turn.
-    const finalSnapshot = await readAssistantSnapshot(Runtime, baselineTurns ?? undefined).catch(
-      () => null,
-    );
-    const finalText = typeof finalSnapshot?.text === "string" ? finalSnapshot.text.trim() : "";
-    if (finalText && finalText !== promptText.trim()) {
-      const trimmedMarkdown = answerMarkdown.trim();
-      const finalIsEcho = promptEchoMatcher ? promptEchoMatcher.isEcho(finalText) : false;
-      const lengthDelta = finalText.length - trimmedMarkdown.length;
-      const missingCopy = !copiedMarkdown && lengthDelta >= 0;
-      const likelyTruncatedCopy =
-        copiedMarkdown &&
-        trimmedMarkdown.length > 0 &&
-        lengthDelta >= Math.max(12, Math.floor(trimmedMarkdown.length * 0.75));
-      if ((missingCopy || likelyTruncatedCopy) && !finalIsEcho && finalText !== trimmedMarkdown) {
-        logger("Refreshed assistant response via final DOM snapshot");
-        answerText = finalText;
-        answerMarkdown = finalText;
+        }
       }
-    }
+      answerText = answer.text;
+      answerHtml = answer.html ?? "";
+      const copiedMarkdown = await raceWithDisconnect(
+        withRetries(
+          async () => {
+            const attempt = await captureAssistantMarkdown(Runtime, answer.meta, logger);
+            if (!attempt) {
+              throw new Error("copy-missing");
+            }
+            return attempt;
+          },
+          {
+            retries: 2,
+            delayMs: 350,
+            onRetry: (attempt, error) => {
+              if (options.verbose) {
+                logger(
+                  `[retry] Markdown capture attempt ${attempt + 1}: ${error instanceof Error ? error.message : error}`,
+                );
+              }
+            },
+          },
+        ),
+      ).catch(() => null);
+      answerMarkdown = copiedMarkdown ?? answerText;
 
-    // Detect prompt echo using normalized comparison (whitespace-insensitive).
-    const alignedEcho = alignPromptEchoPair(
-      answerText,
-      answerMarkdown,
-      promptEchoMatcher,
-      copiedMarkdown ? logger : undefined,
-      {
-        text: "Aligned assistant response text to copied markdown after prompt echo",
-        markdown: "Aligned assistant markdown to response text after prompt echo",
-      },
-    );
-    answerText = alignedEcho.answerText;
-    answerMarkdown = alignedEcho.answerMarkdown;
-    const isPromptEcho = alignedEcho.isEcho;
-    if (isPromptEcho) {
-      logger("Detected prompt echo in response; waiting for actual assistant response...");
-      const deadline = Date.now() + 15_000;
-      let bestText: string | null = null;
-      let stableCount = 0;
-      while (Date.now() < deadline) {
-        const snapshot = await readAssistantSnapshot(Runtime, baselineTurns ?? undefined).catch(
-          () => null,
-        );
-        const text = typeof snapshot?.text === "string" ? snapshot.text.trim() : "";
-        const isStillEcho = !text || Boolean(promptEchoMatcher?.isEcho(text));
-        if (!isStillEcho) {
-          if (!bestText || text.length > bestText.length) {
-            bestText = text;
-            stableCount = 0;
-          } else if (text === bestText) {
-            stableCount += 1;
+      const promptEchoMatcher = buildPromptEchoMatcher(promptText);
+      ({ answerText, answerMarkdown } = await maybeRecoverLongAssistantResponse({
+        runtime: Runtime,
+        baselineTurns,
+        answerText,
+        answerMarkdown,
+        logger,
+        allowMarkdownUpdate: !copiedMarkdown,
+      }));
+
+      // Final sanity check: ensure we didn't accidentally capture the user prompt instead of the assistant turn.
+      const finalSnapshot = await readAssistantSnapshot(Runtime, baselineTurns ?? undefined).catch(
+        () => null,
+      );
+      const finalText = typeof finalSnapshot?.text === "string" ? finalSnapshot.text.trim() : "";
+      if (finalText && finalText !== promptText.trim()) {
+        const trimmedMarkdown = answerMarkdown.trim();
+        const finalIsEcho = promptEchoMatcher ? promptEchoMatcher.isEcho(finalText) : false;
+        const lengthDelta = finalText.length - trimmedMarkdown.length;
+        const missingCopy = !copiedMarkdown && lengthDelta >= 0;
+        const likelyTruncatedCopy =
+          copiedMarkdown &&
+          trimmedMarkdown.length > 0 &&
+          lengthDelta >= Math.max(12, Math.floor(trimmedMarkdown.length * 0.75));
+        if ((missingCopy || likelyTruncatedCopy) && !finalIsEcho && finalText !== trimmedMarkdown) {
+          logger("Refreshed assistant response via final DOM snapshot");
+          answerText = finalText;
+          answerMarkdown = finalText;
+        }
+      }
+
+      // Detect prompt echo using normalized comparison (whitespace-insensitive).
+      const alignedEcho = alignPromptEchoPair(
+        answerText,
+        answerMarkdown,
+        promptEchoMatcher,
+        copiedMarkdown ? logger : undefined,
+        {
+          text: "Aligned assistant response text to copied markdown after prompt echo",
+          markdown: "Aligned assistant markdown to response text after prompt echo",
+        },
+      );
+      answerText = alignedEcho.answerText;
+      answerMarkdown = alignedEcho.answerMarkdown;
+      const isPromptEcho = alignedEcho.isEcho;
+      if (isPromptEcho) {
+        logger("Detected prompt echo in response; waiting for actual assistant response...");
+        const deadline = Date.now() + 15_000;
+        let bestText: string | null = null;
+        let stableCount = 0;
+        while (Date.now() < deadline) {
+          const snapshot = await readAssistantSnapshot(Runtime, baselineTurns ?? undefined).catch(
+            () => null,
+          );
+          const text = typeof snapshot?.text === "string" ? snapshot.text.trim() : "";
+          const isStillEcho = !text || Boolean(promptEchoMatcher?.isEcho(text));
+          if (!isStillEcho) {
+            if (!bestText || text.length > bestText.length) {
+              bestText = text;
+              stableCount = 0;
+            } else if (text === bestText) {
+              stableCount += 1;
+            }
+            if (stableCount >= 2) {
+              break;
+            }
           }
-          if (stableCount >= 2) {
+          await new Promise((resolve) => setTimeout(resolve, 300));
+        }
+        if (bestText) {
+          logger("Recovered assistant response after detecting prompt echo");
+          answerText = bestText;
+          answerMarkdown = bestText;
+        }
+      }
+      const minAnswerChars = 16;
+      if (answerText.trim().length > 0 && answerText.trim().length < minAnswerChars) {
+        const deadline = Date.now() + 12_000;
+        let bestText = answerText.trim();
+        let stableCycles = 0;
+        while (Date.now() < deadline) {
+          const snapshot = await readAssistantSnapshot(Runtime, baselineTurns ?? undefined).catch(
+            () => null,
+          );
+          const text = typeof snapshot?.text === "string" ? snapshot.text.trim() : "";
+          if (text && text.length > bestText.length) {
+            bestText = text;
+            stableCycles = 0;
+          } else {
+            stableCycles += 1;
+          }
+          if (stableCycles >= 3 && bestText.length >= minAnswerChars) {
             break;
           }
+          await delay(400);
         }
-        await new Promise((resolve) => setTimeout(resolve, 300));
-      }
-      if (bestText) {
-        logger("Recovered assistant response after detecting prompt echo");
-        answerText = bestText;
-        answerMarkdown = bestText;
-      }
-    }
-    const minAnswerChars = 16;
-    if (answerText.trim().length > 0 && answerText.trim().length < minAnswerChars) {
-      const deadline = Date.now() + 12_000;
-      let bestText = answerText.trim();
-      let stableCycles = 0;
-      while (Date.now() < deadline) {
-        const snapshot = await readAssistantSnapshot(Runtime, baselineTurns ?? undefined).catch(
-          () => null,
-        );
-        const text = typeof snapshot?.text === "string" ? snapshot.text.trim() : "";
-        if (text && text.length > bestText.length) {
-          bestText = text;
-          stableCycles = 0;
-        } else {
-          stableCycles += 1;
+        if (bestText.length > answerText.trim().length) {
+          logger("Refreshed short assistant response from latest DOM snapshot");
+          answerText = bestText;
+          answerMarkdown = bestText;
         }
-        if (stableCycles >= 3 && bestText.length >= minAnswerChars) {
-          break;
-        }
-        await delay(400);
-      }
-      if (bestText.length > answerText.trim().length) {
-        logger("Refreshed short assistant response from latest DOM snapshot");
-        answerText = bestText;
-        answerMarkdown = bestText;
       }
     }
     if (connectionClosedUnexpectedly) {
@@ -1547,7 +1556,9 @@ async function runRemoteBrowserMode(
       );
     }
 
-    const modelStrategy = config.modelStrategy ?? DEFAULT_MODEL_STRATEGY;
+    const modelStrategy = config.createImageMode
+      ? "current"
+      : (config.modelStrategy ?? DEFAULT_MODEL_STRATEGY);
     if (config.desiredModel && modelStrategy === "select") {
       await bringPageToFront();
       await withRetries(
@@ -1771,27 +1782,27 @@ async function runRemoteBrowserMode(
       return rechecked;
     };
     try {
-      const assistantWait = waitForAssistantResponseWithReload(
-        Runtime,
-        Page,
-        config.timeoutMs,
-        logger,
-        baselineTurns ?? undefined,
-      );
-      const imageWait =
-        config.captureGeneratedImages && config.createImageMode
-          ? waitForNewGeneratedImage(
-              Runtime,
-              baselineGeneratedImageCount,
-              config.timeoutMs,
-              logger,
-            ).then(() => ({
-              text: "",
-              html: undefined,
-              meta: {},
-            }))
-          : null;
-      answer = await (imageWait ? Promise.race([assistantWait, imageWait]) : assistantWait);
+      if (config.captureGeneratedImages && config.createImageMode) {
+        await waitForNewGeneratedImage(
+          Runtime,
+          baselineGeneratedImageCount,
+          config.timeoutMs,
+          logger,
+        );
+        answer = {
+          text: "",
+          html: undefined,
+          meta: {},
+        };
+      } else {
+        answer = await waitForAssistantResponseWithReload(
+          Runtime,
+          Page,
+          config.timeoutMs,
+          logger,
+          baselineTurns ?? undefined,
+        );
+      }
     } catch (error) {
       if (isAssistantResponseTimeoutError(error)) {
         const rechecked = await attemptAssistantRecheck().catch(() => null);
@@ -1827,119 +1838,125 @@ async function runRemoteBrowserMode(
         throw error;
       }
     }
-    const baselineNormalized = baselineAssistantText
-      ? normalizeForComparison(baselineAssistantText)
-      : "";
-    if (baselineNormalized) {
-      const normalizedAnswer = normalizeForComparison(answer.text ?? "");
-      const baselinePrefix =
-        baselineNormalized.length >= 80
-          ? baselineNormalized.slice(0, Math.min(200, baselineNormalized.length))
-          : "";
-      const isBaseline =
-        normalizedAnswer === baselineNormalized ||
-        (baselinePrefix.length > 0 && normalizedAnswer.startsWith(baselinePrefix));
-      if (isBaseline) {
-        logger("Detected stale assistant response; waiting for new response...");
-        const refreshed = await waitForFreshAssistantResponse(baselineNormalized, 15_000);
-        if (refreshed) {
-          answer = refreshed;
-        }
-      }
-    }
     answerText = answer.text;
     answerHtml = answer.html ?? "";
-
-    const copiedMarkdown = await withRetries(
-      async () => {
-        const attempt = await captureAssistantMarkdown(Runtime, answer.meta, logger);
-        if (!attempt) {
-          throw new Error("copy-missing");
-        }
-        return attempt;
-      },
-      {
-        retries: 2,
-        delayMs: 350,
-        onRetry: (attempt, error) => {
-          if (options.verbose) {
-            logger(
-              `[retry] Markdown capture attempt ${attempt + 1}: ${error instanceof Error ? error.message : error}`,
-            );
-          }
-        },
-      },
-    ).catch(() => null);
-
-    answerMarkdown = copiedMarkdown ?? answerText;
-    ({ answerText, answerMarkdown } = await maybeRecoverLongAssistantResponse({
-      runtime: Runtime,
-      baselineTurns,
-      answerText,
-      answerMarkdown,
-      logger,
-      allowMarkdownUpdate: !copiedMarkdown,
-    }));
-
-    // Final sanity check: ensure we didn't accidentally capture the user prompt instead of the assistant turn.
-    const finalSnapshot = await readAssistantSnapshot(Runtime, baselineTurns ?? undefined).catch(
-      () => null,
-    );
-    const finalText = typeof finalSnapshot?.text === "string" ? finalSnapshot.text.trim() : "";
-    if (
-      finalText &&
-      finalText !== answerMarkdown.trim() &&
-      finalText !== promptText.trim() &&
-      finalText.length >= answerMarkdown.trim().length
-    ) {
-      logger("Refreshed assistant response via final DOM snapshot");
-      answerText = finalText;
-      answerMarkdown = finalText;
-    }
-
-    // Detect prompt echo using normalized comparison (whitespace-insensitive).
-    const promptEchoMatcher = buildPromptEchoMatcher(promptText);
-    const alignedEcho = alignPromptEchoPair(
-      answerText,
-      answerMarkdown,
-      promptEchoMatcher,
-      copiedMarkdown ? logger : undefined,
-      {
-        text: "Aligned assistant response text to copied markdown after prompt echo",
-        markdown: "Aligned assistant markdown to response text after prompt echo",
-      },
-    );
-    answerText = alignedEcho.answerText;
-    answerMarkdown = alignedEcho.answerMarkdown;
-    const isPromptEcho = alignedEcho.isEcho;
-    if (isPromptEcho) {
-      logger("Detected prompt echo in response; waiting for actual assistant response...");
-      const deadline = Date.now() + 15_000;
-      let bestText: string | null = null;
-      let stableCount = 0;
-      while (Date.now() < deadline) {
-        const snapshot = await readAssistantSnapshot(Runtime, baselineTurns ?? undefined).catch(
-          () => null,
-        );
-        const text = typeof snapshot?.text === "string" ? snapshot.text.trim() : "";
-        const isStillEcho = !text || Boolean(promptEchoMatcher?.isEcho(text));
-        if (!isStillEcho) {
-          if (!bestText || text.length > bestText.length) {
-            bestText = text;
-            stableCount = 0;
-          } else if (text === bestText) {
-            stableCount += 1;
-          }
-          if (stableCount >= 2) {
-            break;
+    if (config.captureGeneratedImages && config.createImageMode) {
+      answerMarkdown = answerText;
+    } else {
+      const baselineNormalized = baselineAssistantText
+        ? normalizeForComparison(baselineAssistantText)
+        : "";
+      if (baselineNormalized) {
+        const normalizedAnswer = normalizeForComparison(answer.text ?? "");
+        const baselinePrefix =
+          baselineNormalized.length >= 80
+            ? baselineNormalized.slice(0, Math.min(200, baselineNormalized.length))
+            : "";
+        const isBaseline =
+          normalizedAnswer === baselineNormalized ||
+          (baselinePrefix.length > 0 && normalizedAnswer.startsWith(baselinePrefix));
+        if (isBaseline) {
+          logger("Detected stale assistant response; waiting for new response...");
+          const refreshed = await waitForFreshAssistantResponse(baselineNormalized, 15_000);
+          if (refreshed) {
+            answer = refreshed;
           }
         }
-        await new Promise((resolve) => setTimeout(resolve, 300));
       }
-      if (bestText) {
-        logger("Recovered assistant response after detecting prompt echo");
-        answerText = bestText;
-        answerMarkdown = bestText;
+      answerText = answer.text;
+      answerHtml = answer.html ?? "";
+
+      const copiedMarkdown = await withRetries(
+        async () => {
+          const attempt = await captureAssistantMarkdown(Runtime, answer.meta, logger);
+          if (!attempt) {
+            throw new Error("copy-missing");
+          }
+          return attempt;
+        },
+        {
+          retries: 2,
+          delayMs: 350,
+          onRetry: (attempt, error) => {
+            if (options.verbose) {
+              logger(
+                `[retry] Markdown capture attempt ${attempt + 1}: ${error instanceof Error ? error.message : error}`,
+              );
+            }
+          },
+        },
+      ).catch(() => null);
+
+      answerMarkdown = copiedMarkdown ?? answerText;
+      ({ answerText, answerMarkdown } = await maybeRecoverLongAssistantResponse({
+        runtime: Runtime,
+        baselineTurns,
+        answerText,
+        answerMarkdown,
+        logger,
+        allowMarkdownUpdate: !copiedMarkdown,
+      }));
+
+      // Final sanity check: ensure we didn't accidentally capture the user prompt instead of the assistant turn.
+      const finalSnapshot = await readAssistantSnapshot(Runtime, baselineTurns ?? undefined).catch(
+        () => null,
+      );
+      const finalText = typeof finalSnapshot?.text === "string" ? finalSnapshot.text.trim() : "";
+      if (
+        finalText &&
+        finalText !== answerMarkdown.trim() &&
+        finalText !== promptText.trim() &&
+        finalText.length >= answerMarkdown.trim().length
+      ) {
+        logger("Refreshed assistant response via final DOM snapshot");
+        answerText = finalText;
+        answerMarkdown = finalText;
+      }
+
+      // Detect prompt echo using normalized comparison (whitespace-insensitive).
+      const promptEchoMatcher = buildPromptEchoMatcher(promptText);
+      const alignedEcho = alignPromptEchoPair(
+        answerText,
+        answerMarkdown,
+        promptEchoMatcher,
+        copiedMarkdown ? logger : undefined,
+        {
+          text: "Aligned assistant response text to copied markdown after prompt echo",
+          markdown: "Aligned assistant markdown to response text after prompt echo",
+        },
+      );
+      answerText = alignedEcho.answerText;
+      answerMarkdown = alignedEcho.answerMarkdown;
+      const isPromptEcho = alignedEcho.isEcho;
+      if (isPromptEcho) {
+        logger("Detected prompt echo in response; waiting for actual assistant response...");
+        const deadline = Date.now() + 15_000;
+        let bestText: string | null = null;
+        let stableCount = 0;
+        while (Date.now() < deadline) {
+          const snapshot = await readAssistantSnapshot(Runtime, baselineTurns ?? undefined).catch(
+            () => null,
+          );
+          const text = typeof snapshot?.text === "string" ? snapshot.text.trim() : "";
+          const isStillEcho = !text || Boolean(promptEchoMatcher?.isEcho(text));
+          if (!isStillEcho) {
+            if (!bestText || text.length > bestText.length) {
+              bestText = text;
+              stableCount = 0;
+            } else if (text === bestText) {
+              stableCount += 1;
+            }
+            if (stableCount >= 2) {
+              break;
+            }
+          }
+          await new Promise((resolve) => setTimeout(resolve, 300));
+        }
+        if (bestText) {
+          logger("Recovered assistant response after detecting prompt echo");
+          answerText = bestText;
+          answerMarkdown = bestText;
+        }
       }
     }
     stopThinkingMonitor?.();

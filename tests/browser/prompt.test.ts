@@ -20,6 +20,7 @@ function buildOptions(overrides: Partial<RunOracleOptions> = {}): RunOracleOptio
     system: overrides.system,
     browserAttachments: overrides.browserAttachments ?? "auto",
     browserInlineFiles: overrides.browserInlineFiles,
+    maxFileSizeBytes: overrides.maxFileSizeBytes,
   } as RunOracleOptions;
 }
 
@@ -146,6 +147,23 @@ describe("assembleBrowserPrompt", () => {
     expect(result.composerText).toContain("### File: docs/two.md");
     expect(result.attachments).toEqual([]);
     expect(result.inlineFileCount).toBe(2);
+  });
+
+  test("passes configured max file size to browser text file reads", async () => {
+    let observedMaxFileSizeBytes: number | undefined;
+    const options = buildOptions({
+      file: ["bundle.txt"],
+      maxFileSizeBytes: 10 * 1024 * 1024,
+    });
+    await assembleBrowserPrompt(options, {
+      cwd: "/repo",
+      readFilesImpl: async (_paths, readOptions) => {
+        observedMaxFileSizeBytes = readOptions?.maxFileSizeBytes;
+        return [{ path: "/repo/bundle.txt", content: "bundle" }];
+      },
+    });
+
+    expect(observedMaxFileSizeBytes).toBe(10 * 1024 * 1024);
   });
 
   test("inlines files when browserInlineFiles enabled", async () => {

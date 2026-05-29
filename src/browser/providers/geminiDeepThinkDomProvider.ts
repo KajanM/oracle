@@ -17,7 +17,11 @@ export const GEMINI_DEEP_THINK_SELECTORS = {
   ],
   sendButton: ["button.send-button", 'button[aria-label="Send message"]'],
   toolsButton: ["button.toolbox-drawer-button", 'button[aria-label="Tools"]'],
-  toolsMenuItem: ['[role="menuitemcheckbox"]', ".toolbox-drawer-item-list-button"],
+  toolsMenuItem: [
+    '#toolbox-drawer-menu toolbox-drawer-item button',
+    '[role="menuitemcheckbox"]',
+    ".toolbox-drawer-item-list-button",
+  ],
   deepThinkActive: [
     ".toolbox-drawer-item-deselect-button",
     'button[aria-label*="Deselect Deep Think"]',
@@ -128,6 +132,25 @@ async function selectMode(ctx: ProviderDomFlowContext): Promise<void> {
     })()`,
   );
   if (deepThinkClickResult !== "clicked") {
+    const menuDump = await ctx.evaluate(`(() => {
+        const lines = [];
+        lines.push("URL: " + location.href);
+        lines.push("TITLE: " + document.title);
+        const drawer = document.querySelector("#toolbox-drawer-menu");
+        lines.push("drawer present: " + Boolean(drawer));
+        const items = document.querySelectorAll("toolbox-drawer-item");
+        lines.push("toolbox-drawer-item count: " + items.length);
+        items.forEach((el, i) => {
+          if (i > 20) return;
+          const text = (el.textContent || "").trim().replace(/\\s+/g, " ").slice(0, 80);
+          const aria = el.getAttribute("aria-label") || "";
+          lines.push("  " + i + ": aria=\"" + aria + "\" text=\"" + text + "\"");
+        });
+        const signin = document.body.textContent && document.body.textContent.toLowerCase().includes("sign in");
+        lines.push("body contains sign in: " + signin);
+        return lines.join("\\n");
+      })()`);
+    process.stderr.write(`\n[DEEP-THINK MENU DUMP]\n${menuDump || "<empty>"}\n[/DUMP]\n`);
     throw new Error('Unable to select "Deep Think" from Gemini tools menu.');
   }
   await ctx.delay(1_500);

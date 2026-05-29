@@ -135,7 +135,11 @@ function createLogger(): BrowserLogger {
           const idx = tabUrl.indexOf(marker);
           if (idx === -1) return undefined;
           const rest = tabUrl.slice(idx + marker.length);
-          return rest.split(/[/?#]/)[0] || undefined;
+          const end = ["/", "?", "#"]
+    .map((separator) => rest.indexOf(separator))
+    .filter((index) => index >= 0)
+    .sort((a, b) => a - b)[0];
+  return rest.slice(0, end ?? rest.length) || undefined;
         })();
 
         runtime = {

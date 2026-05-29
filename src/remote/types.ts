@@ -23,7 +23,7 @@ export interface RemoteRunPayload {
 // only events strictly after the last one they observed. `runId` identifies
 // the server-side run and is required to resume after a transport drop.
 export type RemoteRunEvent =
-  | { type: "runId"; seq: number; runId: string }
+  | { type: "runId"; seq: number; runId: string; retentionMs?: number; startedAt?: string }
   | { type: "log"; seq: number; message: string }
   | { type: "result"; seq: number; result: BrowserRunResult }
   | { type: "error"; seq: number; message: string };

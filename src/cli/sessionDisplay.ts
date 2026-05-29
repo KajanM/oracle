@@ -1,5 +1,7 @@
 import chalk from "chalk";
 import kleur from "kleur";
+import fs from "node:fs/promises";
+import path from "node:path";
 import type {
   SessionMetadata,
   SessionTransportMetadata,
@@ -9,6 +11,9 @@ import type { OracleResponseMetadata } from "../oracle.js";
 import { renderMarkdownAnsi } from "./markdownRenderer.js";
 import { formatFinishLine } from "../oracle/finishLine.js";
 import { sessionStore, wait } from "../sessionStore.js";
+import { loadUserConfig } from "../config.js";
+import { resolveRemoteServiceConfig } from "../remote/remoteServiceConfig.js";
+import { recoverRemoteBrowserRun } from "../remote/client.js";
 import { formatTokenCount, formatTokenValue } from "../oracle/runUtils.js";
 import type { BrowserLogger } from "../browser/types.js";
 import { resumeBrowserSession } from "../browser/reattach.js";
@@ -27,6 +32,110 @@ import {
 const isTty = (): boolean => Boolean(process.stdout.isTTY);
 const dim = (text: string): string => (isTty() ? kleur.dim(text) : text);
 export const MAX_RENDER_BYTES = 200_000;
+
+async function tryRecoverRemoteBrowserSession(metadata: SessionMetadata): Promise<SessionMetadata> {
+  const remote = metadata.browser?.remote;
+  if (!remote?.host || !remote.runId) return metadata;
+  const { config: userConfig } = await loadUserConfig();
+  const resolvedRemote = resolveRemoteServiceConfig({ userConfig, env: process.env });
+  const token = resolvedRemote.token;
+  if (!token) {
+    console.log(
+      chalk.yellow(
+        `Remote browser run ${remote.runId} is known, but ORACLE_REMOTE_TOKEN/config browser.remoteToken is missing; cannot replay retained events.`,
+      ),
+    );
+    return metadata;
+  }
+  console.log(chalk.yellow(`Checking remote browser run ${remote.runId} for retained completion events...`));
+  const recovered = await recoverRemoteBrowserRun({
+    host: remote.host,
+    token,
+    runId: remote.runId,
+    cursor: remote.cursor ?? -1,
+  });
+  if (recovered.status === "completed") {
+    const outputTokens = estimateTokenCount(
+      recovered.result.answerMarkdown || recovered.result.answerText || "",
+    );
+    const answer = recovered.result.answerMarkdown || recovered.result.answerText || "";
+    const logWriter = sessionStore.createLogWriter(metadata.id);
+    logWriter.logLine("[remote-recovery] replayed retained remote browser result");
+    logWriter.logLine("Answer:");
+    logWriter.logLine(answer);
+    logWriter.stream.end();
+    if (metadata.model) {
+      await sessionStore.updateModelRun(metadata.id, metadata.model, {
+        status: "completed",
+        usage: {
+          inputTokens: 0,
+          outputTokens,
+          reasoningTokens: 0,
+          totalTokens: outputTokens,
+        },
+        completedAt: new Date().toISOString(),
+      });
+    }
+    const artifacts = await persistRecoveredBrowserAnswerArtifacts(metadata.id, {
+      text: recovered.result.answerText || "",
+      markdown: answer,
+      html: recovered.result.answerHtml,
+    });
+    await sessionStore.updateSession(metadata.id, {
+      status: "completed",
+      completedAt: new Date().toISOString(),
+      usage: { inputTokens: 0, outputTokens, reasoningTokens: 0, totalTokens: outputTokens },
+      elapsedMs: recovered.result.tookMs,
+      browser: {
+        config: metadata.browser?.config,
+        runtime: metadata.browser?.runtime,
+        remote: recovered.remote,
+        answerArtifacts: artifacts,
+      },
+      response: { status: "completed" },
+      error: undefined,
+      transport: undefined,
+    });
+    console.log(chalk.green("Remote replay succeeded; session marked completed."));
+    return (await sessionStore.readSession(metadata.id)) ?? metadata;
+  }
+  if (recovered.status === "errored" || recovered.status === "unavailable") {
+    await sessionStore.updateSession(metadata.id, {
+      browser: { ...metadata.browser, remote: recovered.remote },
+    });
+    console.log(chalk.yellow(`Remote replay unavailable: ${recovered.message}`));
+    return (await sessionStore.readSession(metadata.id)) ?? metadata;
+  }
+  await sessionStore.updateSession(metadata.id, {
+    browser: { ...metadata.browser, remote: recovered.remote },
+  });
+  return (await sessionStore.readSession(metadata.id)) ?? metadata;
+}
+
+async function persistRecoveredBrowserAnswerArtifacts(
+  sessionId: string,
+  answer: { text: string; markdown: string; html?: string },
+): Promise<NonNullable<SessionMetadata["browser"]>["answerArtifacts"]> {
+  const paths = await sessionStore.getPaths(sessionId);
+  const artifacts: NonNullable<SessionMetadata["browser"]>["answerArtifacts"] = {};
+  const markdown = answer.markdown || answer.text || "";
+  if (markdown.trim().length > 0) {
+    const rawMarkdownPath = path.join(paths.dir, "answer.raw.md");
+    await fs.writeFile(rawMarkdownPath, markdown.endsWith("\n") ? markdown : `${markdown}\n`, "utf8");
+    artifacts.rawMarkdownPath = rawMarkdownPath;
+  }
+  if (answer.html && answer.html.trim().length > 0) {
+    const htmlPath = path.join(paths.dir, "answer.html");
+    await fs.writeFile(htmlPath, answer.html, "utf8");
+    artifacts.htmlPath = htmlPath;
+  }
+  if (answer.text && answer.text.trim().length > 0 && answer.text !== markdown) {
+    const textPath = path.join(paths.dir, "answer.txt");
+    await fs.writeFile(textPath, answer.text.endsWith("\n") ? answer.text : `${answer.text}\n`, "utf8");
+    artifacts.textPath = textPath;
+  }
+  return artifacts;
+}
 
 function isProcessAlive(pid?: number): boolean {
   if (!pid) return false;
@@ -151,6 +260,9 @@ export async function attachSession(
       process.exitCode = 1;
       return;
     }
+  }
+  if (metadata.mode === "browser" && metadata.status === "running" && metadata.browser?.remote?.runId) {
+    metadata = await tryRecoverRemoteBrowserSession(metadata);
   }
   const initialStatus = metadata.status;
   const wantsRender = Boolean(options?.renderMarkdown);

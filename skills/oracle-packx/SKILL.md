@@ -102,12 +102,23 @@ mcp__oracle__consult({
 })
 ```
 
+
+### Browser-mode durability and answer fidelity
+
+Browser-mode sessions now persist remote `oracle serve` identity separately from Chrome runtime metadata:
+
+- `~/.oracle/sessions/{slug}/meta.json` → `browser.remote` stores `host`, `runId`, `cursor`, status, retention, and conversation URL when known. It must never contain `remoteToken`.
+- `browser.runtime` remains only Chrome/CDP details (`chromePort`, `tabUrl`, target id, etc.). Do not treat it as the remote serve run identity.
+- If a local client disconnects while the remote browser run continues, first run `oracle session {slug}` or `mcp__oracle__sessions({ id: "{slug}", detail: true })`; retained remote NDJSON events can be replayed from `browser.remote.runId` while the serve buffer is still available.
+- For high-fidelity answers, prefer `~/.oracle/sessions/{slug}/answer.raw.md` over `output.log` when present. `answer.html` may also exist for DOM/copy-button fidelity checks. `output.log` remains the human-readable transcript and may be less canonical for large Markdown/code-fence responses.
+- If replay says the remote run is unavailable/GC'd, report the `browser.remote.unavailableReason` and retention window rather than retrying blindly.
+
 ### Step 7: Read the FULL response
 
 The MCP tool only returns the **last 4000 bytes** (hardcoded truncation). The full response is on disk:
 
 ```
-Read ~/.oracle/sessions/{slug}/output.log
+Read ~/.oracle/sessions/{slug}/answer.raw.md if present; otherwise read ~/.oracle/sessions/{slug}/output.log
 ```
 
 If the file doesn't exist yet, check status with `mcp__oracle__sessions({ id: "{slug}", detail: true })`.
