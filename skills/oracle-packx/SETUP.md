@@ -45,7 +45,7 @@ The `oracle` MCP server binary lives in this repo. The public `@steipete/oracle`
 ```bash
 mkdir -p ~/dev
 cd ~/dev
-gh repo clone johnlindquist/oracle
+gh repo clone kajanm/oracle
 cd oracle
 pnpm install
 pnpm run build

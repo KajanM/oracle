@@ -44,7 +44,7 @@ Add this to `~/.zshrc`:
 ```zsh
 export ORACLE_HOME_DIR="$HOME/.oracle-local"
 export ORACLE_BROWSER_REMOTE_DEBUG_HOST="127.0.0.1"
-export ORACLE_REPO_DIR="$HOME/dev/ai-ecosystem/oracle"
+export ORACLE_REPO_DIR="$HOME/dev/oracle"
 
 alias oracle='node "$ORACLE_REPO_DIR/dist/bin/oracle-cli.js"'
 alias oracle-browser='oracle --engine browser --browser-chrome-path /usr/bin/google-chrome --browser-manual-login --browser-manual-login-profile-dir "$HOME/.oracle-local/browser-profile"'
