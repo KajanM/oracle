@@ -106,9 +106,13 @@ export function resolveBrowserConfig(
     allowCookieErrors:
       config?.allowCookieErrors ?? envAllowCookieErrors ?? DEFAULT_BROWSER_CONFIG.allowCookieErrors,
     thinkingTime: config?.thinkingTime,
-    manualLogin: false,
-    manualLoginProfileDir: null,
-    manualLoginCookieSync: false,
+    manualLogin: config?.manualLogin ?? DEFAULT_BROWSER_CONFIG.manualLogin,
+    manualLoginProfileDir:
+      config?.manualLoginProfileDir ??
+      process.env.ORACLE_BROWSER_PROFILE_DIR ??
+      DEFAULT_BROWSER_CONFIG.manualLoginProfileDir,
+    manualLoginCookieSync:
+      config?.manualLoginCookieSync ?? DEFAULT_BROWSER_CONFIG.manualLoginCookieSync,
     createImageMode: config?.createImageMode ?? false,
     captureGeneratedImages: config?.captureGeneratedImages ?? false,
   };

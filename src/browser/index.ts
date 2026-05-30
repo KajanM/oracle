@@ -139,13 +139,6 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
       })}`,
     );
   }
-  config = {
-    ...config,
-    manualLogin: false,
-    manualLoginProfileDir: null,
-    manualLoginCookieSync: false,
-  };
-
   if (!config.remoteChrome && !config.manualLogin) {
     const preferredPort = config.debugPort ?? DEFAULT_DEBUG_PORT;
     const availablePort = await pickAvailableDebugPort(preferredPort, logger);
@@ -170,9 +163,18 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
     return runRemoteBrowserMode(promptText, attachments, config, logger, options);
   }
 
-  const manualLogin = false;
-  const userDataDir = await mkdtemp(path.join(await resolveUserDataBaseDir(), "oracle-browser-"));
-  logger(`Created temporary Chrome profile at ${userDataDir}`);
+  const manualLogin = Boolean(config.manualLogin);
+  const userDataDir = manualLogin
+    ? (config.manualLoginProfileDir ?? path.join(await resolveUserDataBaseDir(), "browser-profile"))
+    : await mkdtemp(path.join(await resolveUserDataBaseDir(), "oracle-browser-"));
+  if (manualLogin) {
+    await mkdir(userDataDir, { recursive: true });
+  }
+  logger(
+    manualLogin
+      ? `Using persistent Chrome profile at ${userDataDir}`
+      : `Created temporary Chrome profile at ${userDataDir}`,
+  );
 
   const effectiveKeepBrowser = Boolean(config.keepBrowser);
   const chromeStartMs = Date.now();

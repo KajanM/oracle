@@ -572,6 +572,24 @@ program
   )
   .addOption(
     new Option(
+      "--browser-manual-login",
+      "Use a persistent automation profile and sign in manually once.",
+    ).hideHelp(),
+  )
+  .addOption(
+    new Option(
+      "--browser-manual-login-profile-dir <path>",
+      "Persistent profile directory for --browser-manual-login.",
+    ).hideHelp(),
+  )
+  .addOption(
+    new Option(
+      "--browser-manual-login-cookie-sync",
+      "Allow cookie sync even when --browser-manual-login is enabled.",
+    ).hideHelp(),
+  )
+  .addOption(
+    new Option(
       "--browser-model-strategy <mode>",
       "ChatGPT model picker strategy: select (default) switches to the requested model, current keeps the active model, ignore skips the picker entirely.",
     ).choices(["select", "current", "ignore"]),
@@ -2130,6 +2148,9 @@ function printDebugHelp(cliName: string): void {
     ["--browser-headless", "Launch Chrome in headless mode."],
     ["--browser-hide-window", "Hide the Chrome window (macOS headful only)."],
     ["--browser-keep-browser", "Leave Chrome running after completion."],
+    ["--browser-manual-login", "Reuse a persistent automation profile and sign in once."],
+    ["--browser-manual-login-profile-dir <path>", "Set the persistent manual-login profile dir."],
+    ["--browser-manual-login-cookie-sync", "Seed the persistent profile from existing cookies."],
   ]);
   console.log("");
   console.log(chalk.dim(`Tip: run \`${cliName} --help\` to see the primary option set.`));

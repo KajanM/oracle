@@ -23,6 +23,9 @@ export interface BrowserDefaultsOptions {
   browserHeadless?: boolean;
   browserHideWindow?: boolean;
   browserKeepBrowser?: boolean;
+  browserManualLogin?: boolean;
+  browserManualLoginProfileDir?: string;
+  browserManualLoginCookieSync?: boolean;
   browserModelStrategy?: BrowserModelStrategy;
   browserThinkingTime?: ThinkingTimeLevel;
 }
@@ -104,6 +107,19 @@ export function applyBrowserDefaultsFromConfig(
   }
   if (isUnset("browserKeepBrowser") && browser.keepBrowser !== undefined) {
     options.browserKeepBrowser = browser.keepBrowser;
+  }
+  if (isUnset("browserManualLogin") && browser.manualLogin !== undefined) {
+    options.browserManualLogin = browser.manualLogin;
+  }
+  if (
+    isUnset("browserManualLoginProfileDir") &&
+    browser.manualLoginProfileDir !== undefined &&
+    browser.manualLoginProfileDir !== null
+  ) {
+    options.browserManualLoginProfileDir = browser.manualLoginProfileDir;
+  }
+  if (isUnset("browserManualLoginCookieSync") && browser.manualLoginCookieSync !== undefined) {
+    options.browserManualLoginCookieSync = browser.manualLoginCookieSync;
   }
   if (isUnset("browserModelStrategy") && browser.modelStrategy !== undefined) {
     options.browserModelStrategy = browser.modelStrategy;

@@ -126,6 +126,10 @@ export async function waitForAssistantResponse(
     const winner = await Promise.race([raceReadyEvaluation, pollerPromise]);
     if (winner.kind === "poll") {
       if (!winner.value) {
+        const copied = await recoverAssistantResponseFromCopyButton(Runtime, logger, domContext);
+        if (copied) {
+          return copied;
+        }
         throw { source: "poll" as const, error: new Error(ASSISTANT_POLL_TIMEOUT_ERROR) };
       }
       logger(`[browser] [response] poller won race — ${winner.value.text.length} chars captured`);
@@ -462,6 +466,9 @@ async function parseAssistantEvaluationResult(
         ? ((result.value as { messageId?: string }).messageId ?? undefined)
         : undefined;
     const text = cleanAssistantText(String((result.value as { text: unknown }).text ?? ""));
+    if (!text.trim()) {
+      return null;
+    }
     const normalized = text.toLowerCase();
     if (isAnswerNowPlaceholderText(normalized)) {
       return null;
@@ -811,12 +818,43 @@ export async function pollAssistantCompletion(
   const snapshot = await readAssistantSnapshot(Runtime, minTurnIndex);
   const snapshotFromDom = domContext ? await readAssistantSnapshot(Runtime, minTurnIndex, domContext) : snapshot;
   const result = normalizeAssistantSnapshot(snapshotFromDom);
+  if (!result) {
+    const copied = await recoverAssistantResponseFromCopyButton(
+      Runtime,
+      logger ?? (() => {}),
+      domContext,
+    );
+    if (copied) {
+      logger?.(`[browser] [poll] copy-button fallback captured — ${copied.text.length} chars`);
+      return copied;
+    }
+  }
   if (logger) {
     logger(
-      `[browser] [poll] snapshot captured — ${result?.text.length ?? 0} chars`,
+      result
+        ? `[browser] [poll] snapshot captured — ${result.text.length} chars`
+        : "[browser] [poll] snapshot missing or empty",
     );
   }
   return result;
+}
+
+async function recoverAssistantResponseFromCopyButton(
+  Runtime: ChromeClient["Runtime"],
+  logger: BrowserLogger,
+  domContext?: AssistantDomContext | null,
+): Promise<{
+  text: string;
+  html?: string;
+  meta: { turnId?: string | null; messageId?: string | null };
+} | null> {
+  const markdown = await captureAssistantMarkdown(Runtime, {}, logger, domContext).catch(() => null);
+  const text = typeof markdown === "string" ? cleanAssistantText(markdown) : "";
+  if (!text.trim() || isAnswerNowPlaceholderText(text.toLowerCase())) {
+    return null;
+  }
+  logger(`[browser] [response] recovered assistant response via copy button — ${text.length} chars`);
+  return { text, html: undefined, meta: {} };
 }
 
 async function capturePartialAssistantProgress(
