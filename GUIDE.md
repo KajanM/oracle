@@ -96,7 +96,7 @@ my Mac mini is set up to do (see [Run it as a service](#optional-run-it-as-an-al
 - **Google Chrome**, signed into ChatGPT (and Gemini if you want Gemini mode).
 - **Tailscale** on every machine — only needed for Mode B.
 - A GitHub fork of Oracle if you want to track your own changes (mine is
-  `johnlindquist/oracle`, forked from `steipete/oracle`).
+  `kajanm/oracle` forked from `johnlindquist/oracle`).
 
 ---
 

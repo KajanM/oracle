@@ -4,7 +4,7 @@ You are Claude Code on a fresh machine. Your job: make the `oracle-packx` skill 
 
 Target end-state:
 - `packx` CLI installed and on PATH
-- `johnlindquist/oracle` cloned, dependencies installed, built
+- `kajanm/oracle` cloned, dependencies installed, built
 - `oracle-packx` skill available to Claude Code under `~/.claude/skills/oracle-packx/`
 - `oracle` MCP server registered in Claude settings and pointing at the local build
 - A smoke test that produces an Oracle response end-to-end
@@ -160,7 +160,7 @@ If the MCP tool errors with "busy" or concurrency issues: check `ORACLE_MAX_CONC
 
 ## 8. Keeping the fork current
 
-When you push new commits to `johnlindquist/oracle` from the other machine:
+When you push new commits to `kajanm/oracle` from the other machine:
 
 ```bash
 cd ~/dev/oracle
@@ -180,7 +180,7 @@ No MCP re-registration is needed — the config points at the built file, which 
 | `mcp__oracle__consult` not in tool list | Restart Claude Code; verify `~/.claude.json` has the `oracle` entry and the path is absolute and exists |
 | `oracle-packx` skill not listed | `ls ~/.claude/skills/oracle-packx/SKILL.md` must exist; restart Claude Code |
 | Build fails with native module errors | Ensure Node >= 20 and that you ran `pnpm install` (not `npm install`) |
-| `gh repo clone` 404 | You are not authenticated as `johnlindquist`, or you lack access to the private repo. Run `gh auth status` |
+| `gh repo clone` 404 | You are not authenticated as `kajanm`, or you lack access to the private repo. Run `gh auth status` |
 | packx bundle is empty | `-i` patterns need `**/` prefix for nested files; use `packx --preview` to debug filters |
 | Oracle session hangs on login | Browser mode requires manual ChatGPT login on first run — complete it in the launched Chrome window |
 
@@ -189,7 +189,7 @@ No MCP re-registration is needed — the config points at the built file, which 
 ## Inventory of things this setup relies on
 
 - **packx** — public npm (`packx`), source `github.com/johnlindquist/pack`
-- **oracle MCP server** — private repo `github.com/johnlindquist/oracle` (this repo), built locally
+- **oracle MCP server** — private repo `github.com/kajanm/oracle` (this repo), built locally
 - **Chrome** — system install, used in browser automation mode
 - **ChatGPT Pro account** — manual login required once per Chrome profile
 - **Claude Code** — already installed (you are running inside it)
